@@ -104,16 +104,21 @@ Remote ingest and scan still run against storage the client can see, or against 
 
 - One `bpm` process opens one catalog per invocation.
 - `bpm serve` in v1 holds a read-only connection. It does not take the write lock and it cannot mutate the catalog.
-- DuckDB allows many readers and one writer. BPM takes an exclusive advisory lock on a sibling lock file for the duration of a write transaction (`<catalog>.lock` next to the DuckDB file). Readers, including `bpm serve`, do not take it.
+- DuckDB allows many readers and one writer. BPM takes an exclusive advisory lock on `<catalog>.lock`, next to the DuckDB file, only for the duration of one write transaction. Readers, including `bpm serve`, do not take it. Walking a directory and hashing bytes do not take it.
 - A writer that cannot acquire the lock within a few seconds exits with "catalog is busy", naming the lock file. It does not queue silently.
-- Ingest commits in batches of 1,000 new files. A crash or a lock loss keeps a committed prefix. The next ingest continues. Batch size is an internal parameter.
+- Ingest and scan hash a batch of files with the catalog lock released, then take the lock to commit that batch, then release it and hash the next batch. The batch is 1,000 files. That count is internal. A crash keeps every batch already committed. The next run continues.
+- A long run's liveness is a separate file, `<catalog>.run-<id>.lock`, held with an exclusive flock for the whole command. It is not the catalog write lock, so other writers proceed between batches. The kernel releases the flock if the process dies. The next open that finds a run still marked `running`, and that can acquire this flock, marks the run `incomplete` and removes the file.
 - Read-write actions from the web UI are Core v2 and are TBD. They are not in v1.
 
 Catalog files and `~/.bpm` are created with mode `0600` for files and `0700` for directories. The embedded engine does not add its own encryption. Disk encryption is the operator's, or the institution's, responsibility. The PRD's statement that anyone who can read the file can read the metadata is this choice.
 
 ### User config
 
-`~/.bpm/context.toml` may record named catalogs. It has no `current` key, and a command never opens a catalog because the file names it. Resolution stays `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.duckdb`. A remote catalog entry, and `bpm use`, belong to Govern and are **UNSTABLE / TBD** (PRD §5 and the `*` rows in PRD §4.13). The `bpm serve` token is `--token` or `BPM_TOKEN`. It is not written into this file.
+`~/.bpm/context.toml` may record named catalogs. It has no `current` key, and a command never opens a catalog because the file names it. Resolution stays `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.duckdb`. Walk filters do not live in this file.
+
+`~/.bpm/config.toml` holds global tool settings. Today that is the denylist, described in §6. A command reads it for those settings. It does not select a catalog.
+
+A remote catalog entry, and `bpm use`, belong to Govern and are **UNSTABLE / TBD** (PRD §5 and the `*` rows in PRD §4.13). The `bpm serve` token is `--token` or `BPM_TOKEN`. It is not written into either file. `context.toml` may look like this:
 
 ```toml
 [catalogs.cll]
@@ -257,7 +262,7 @@ Cycles are rejected in the library when an edge is recorded, by walking ancestor
 
 Ingest and scan are different commands, so their run logs are different tables with the same columns: id, backend, root_uri (empty when a scan has no path), started_at, finished_at, status (`running`, `complete`, `incomplete`), files_seen, files_created (ingest only). Errors are rows of run id, uri, and message.
 
-A run left `running` by a crash is `incomplete` the next time a process opens the catalog and finds no live lock from that run. Running the command again is the recovery. Individual file batches are already committed. Ingest does not mark missing paths. Scan does.
+A run left `running` by a crash is `incomplete` the next time a process opens the catalog and can take that run's liveness flock. The catalog lock is not the signal, because it is released between batches of a live run. Running the command again is the recovery. Individual file batches are already committed. Ingest does not mark missing paths. Scan does.
 
 ### manifests
 
@@ -317,7 +322,7 @@ The digest BPM computes by reading bytes is BLAKE3, algorithm `blake3`, wire for
 
 On a posix location, `bpm scan` streams each selected location once through BLAKE3. Ingest reads a whole file only to test a duplicate: same size, same fingerprint scheme, and same fingerprint as a file already in the catalog. It hashes the new path and, when the existing file has no BLAKE3, that file's current bytes too. Matching BLAKE3 values add a location.
 
-An MD5 stream is a second pass, only when the operator requests MD5. The flag for that request is TBD.
+`bpm scan --md5` is a second pass that stores algorithm `md5`. Without the flag, scan does not compute MD5. Ingest does not compute it.
 
 ### Backend checksums
 
@@ -333,7 +338,17 @@ Drift against a trusted checksum compares what the backend returns now with the 
 
 The denylist and the whitelist apply to the ingest walk and to which existing locations a scan checks. They do not delete a catalog row that a later filter would have skipped.
 
-The default denylist is the file names `.DS_Store` and `Thumbs.db`. The operator can change the list. Where that configuration lives — a flag, a file, or the catalog — is TBD. Disabling the denylist skips nothing by name.
+The built-in denylist is the file names `.DS_Store` and `Thumbs.db`. It always applies, unless this run passes `--no-default-denylist`.
+
+Further patterns are globs. A pattern with no `/` matches the final path component, so `*.txt` skips that name at any depth. A pattern containing `/` is matched against the path relative to the walk root, or against the scan path as the whitelist is, and uses the same `*` and `**` rules.
+
+`~/.bpm/config.toml` may set a global list:
+
+```toml
+denylist = ["*.txt", "scratch/**"]
+```
+
+`--denylist '*.txt,*.bak'` replaces that global list for one run. The patterns are comma-separated. A pattern that itself contains a comma is written in the toml, as one string in the array. Passing `--denylist` does not drop the built-in names. `--no-default-denylist` does. There is no per-catalog denylist and no denylist file discovered by walking up from the data.
 
 The whitelist is zero or more glob patterns. With none set, every path that survives the denylist is eligible. With one or more set, a path must match at least one pattern and must not be denied. `*` does not cross `/`. `**` does. On ingest the pattern is matched against the path relative to the walk root. On scan it is matched against the location path relative to the scan root, or against the full URI when the scan covers a whole backend.
 
@@ -523,7 +538,7 @@ The localhost UI does not go through these routes. It calls the trait. Keeping o
 
 ## 11. Migrations, tests, and the benchmark
 
-Schema version lives in `catalog_meta.schema_version`. On open, the library runs ordered SQL migrations embedded in the binary until the stored version matches the code. Migrations are forward-only in Core. A catalog written by a newer binary is refused by an older binary with a message that names both versions.
+Schema version lives in `catalog_meta.schema_version`. On open, a writer runs ordered SQL migrations embedded in the binary until the stored version matches the code. Migrations are forward-only. A catalog written by a newer binary is refused by an older binary with a message that names both versions. The procedure, the DuckDB `ALTER TABLE` limits, and the separate problem of the DuckDB storage format are in [Catalog migrations](migrations.md).
 
 Core has no operations database. When that database exists, under the unstable Govern sketch, it migrates the same way with its own version.
 
@@ -561,7 +576,7 @@ In the Govern sketch, audit can stay an append-only table in whichever engine ho
 
 | Topic | Decision |
 | --- | --- |
-| Binary | Cargo package remains `bpm3`. The binary target is `bpm`. |
+| Binary | Cargo package remains `bpm3`. The binary target is `bpm`. The package is not renamed: the names `bpm` and `bpm_next` belong to deprecated packages. |
 | Process | One library, called in-process by `bpm` and `bpm serve`. A second binary, `bpmd`, is PRD §5, which is unstable. |
 | Store | Embedded DuckDB, one file per catalog. A side operations database is the Govern sketch, not a Core dependency. |
 | Seam | A catalog trait of semantic operations. The remote transport is not chosen: HTTP, or gRPC or similar (§2). SQL is local-only, and `--write` does not record history until PRD §4.7. |
@@ -569,8 +584,8 @@ In the Govern sketch, audit can stay an append-only table in whichever engine ho
 | Attachments | One `files` table, with no node column. `file_links` and `entity_metadata` use `(node_type, node_id)`. That pair is not a foreign key. The library checks it. Ingest does not write links. |
 | Digests | Rows in `file_digests`, one current row per algorithm, generation column is the history. Acknowledge clears every current digest for the file together. |
 | Fingerprint | First scheme is XXH3-128, named on the row. Nullable. A new scheme does not rewrite existing rows or change file ids. Compared only when the scheme strings match. |
-| Full digest | BLAKE3 when BPM reads bytes. A backend that publishes checksums is trusted, and downloading the body is an explicit flag whose spelling is TBD. MD5 only when asked; that flag is also TBD. |
-| Ingest commit | Batches of 1,000 new files. Advisory lock around writes. Readers, including `bpm serve`, do not take the lock. |
+| Full digest | BLAKE3 when BPM reads bytes. `bpm scan --md5` stores MD5 as a second pass. A backend that publishes checksums is trusted. The flag that forces a download is deferred until the object-store stage. |
+| Ingest commit | Batches of 1,000 files. The catalog lock is held only while a batch is committed. Hashing happens with the lock released. A per-run flock records that a long run is still alive. |
 | Manifest mutation | **Unstable (PRD §4.10).** Sketch: content body immutable. Snapshot may be refreshed in place. |
 | UI | Server-rendered Askama. HTMX, compiled DaisyUI CSS, and any other JS or CSS are vendored under `assets/vendor/` and embedded. Default `127.0.0.1:3000`. v1 is read-only. A non-default host requires a token. |
 | Authz source of truth | **Unstable (PRD §5).** Sketch: BPM role bindings. OIDC proves identity. No IdP group mapping in the first cut. |
@@ -583,5 +598,4 @@ In the Govern sketch, audit can stay an append-only table in whichever engine ho
 1. **Hash-chained audit.** Append-only plus file permissions is the current bar. A hash chain is easy to add later and harder to retrofit into an export an auditor already has. Decide before the first production Govern deployment, not before Core.
 2. **Scan from a laptop against a server that cannot see those paths.** The batch operation on the trait allows it. The first Govern deployment does not expose it. Confirm that the first server really shares a filesystem with the data.
 3. **Background ingest and scan in `bpm serve`.** Not part of the read-only v1 UI. If Core v2 starts those operations from the browser, the scheduling design (thread in-process versus a subprocess) is still open.
-4. **Template engine.** Askama is the choice so templates fail at compile time. If partials become awkward, Minijinja is the fallback. Either way, HTMX stays in the HTML.
-5. **Package name.** The binary target is `bpm`. The Cargo package is still `bpm3`. Rename the package when the first modules land.
+4. **Object-store download flag.** Ingest and scan trust a published checksum and download the body only when asked. The spelling of that flag is deferred until the object-store stage starts.

@@ -329,7 +329,7 @@ Core stores `consent`, `embargo_until`, and any other policy note the operator w
 
 ### 4.13 Command vocabulary
 
-Rows with an empty Unstable cell are the Core command contract. A `*` means the command is under consideration and is not finalized, in this section or in the section cited. Flag spelling for an unmarked command is fixed when that command is implemented. `bpm scan` may still gain flags, including the download flag and digest algorithms other than BLAKE3. Those flags are TBD and are not part of the contract yet. `bpm link` takes an entity and a role string. It does not take a primary flag. That idea is undefined until we give it behavior.
+Rows with an empty Unstable cell are the Core command contract. A `*` means the command is under consideration and is not finalized, in this section or in the section cited. Flag spelling for an unmarked command is fixed when that command is implemented. `bpm scan --md5` requests an MD5 digest as a second pass. The download flag for object stores is deferred until that stage. Other scan flags are still TBD and are not part of the contract yet. `bpm link` takes an entity and a role string. It does not take a primary flag. That idea is undefined until we give it behavior.
 
 The token typed into `bpm serve` is not `bpm login`. `bpm login` is the future client for a Govern server.
 
@@ -343,7 +343,7 @@ The token typed into `bpm serve` is not `bpm login`. `bpm login` is the future c
 | `bpm delete` | Delete an entity, a link, a location, or a file row. Never deletes bytes | |
 | `bpm meta set / get / unset` | Edit metadata on an entity or a file | |
 | `bpm ingest` | Add files from a path. Does not recheck files already in the catalog, except when a new path is a duplicate of one | |
-| `bpm scan` | Report drift for locations already in the catalog. A local filesystem read stores BLAKE3. An object store that publishes a checksum is trusted unless a flag requests a download. No arguments scans every location. A backend or a path narrows that set | |
+| `bpm scan` | Report drift for locations already in the catalog. A local filesystem read stores BLAKE3. `--md5` also stores MD5. An object store that publishes a checksum is trusted unless a download is requested. No arguments scans every location. A backend or a path narrows that set | |
 | `bpm link` / `bpm unlink` | Attach or detach a file and an entity. The role is an open string | |
 | `bpm acknowledge` | Accept drifted bytes as a new generation | |
 | `bpm sql` | Local SQL, read-only unless `--write` | |
@@ -568,7 +568,8 @@ These were settled before the draft, or chosen while writing it so the acceptanc
 | Sample granularity | Analyte, portion, slide, and aliquot are metadata. Sibling Samples plus `source_sample` cover a specimen and its slide when both must be nodes. |
 | Discovery | Scan first, link second. Unlinked files are kept. |
 | Identity | Stable file id, plus tagged digests, plus locations. Fingerprint suggests, and only within one scheme. BLAKE3 confirms when bytes are read. A published backend checksum is trusted. |
-| Ingest and scan | `bpm ingest` adds new paths and consults the catalog only for duplicates. `bpm scan` reports drift for locations already ingested, computing BLAKE3 when it reads bytes. |
+| Ingest and scan | `bpm ingest` adds new paths and consults the catalog only for duplicates. `bpm scan` reports drift for locations already ingested, computing BLAKE3 when it reads bytes. `--md5` is an optional second pass. |
+| License | Apache-2.0. |
 | In-place change | The file id stays. Acknowledge starts a new digest generation and keeps the old one. |
 | Policy in Core | Stored and returned. Query and manifest do not filter on it. |
 | Manifest hash | `content_id` ignores locations. `snapshot_id` includes them. |
@@ -584,7 +585,5 @@ Answers here would change this draft.
 
 1. **Sample-to-sample lineage.** `source_sample` is a string with no foreign key. If officers need "this slide came from that aliquot" to drive censoring the way derived-from does for files, it has to become a real edge. Today only file edges drive impact.
 2. **Format parsers.** Core v1 ingests metadata the operator supplies. It does not read FASTQ, BAM, VCF, or SVS headers. Parsers would improve augmentation and would widen Core's scope.
-3. **MD5 by default.** BLAKE3 is the digest `bpm scan` computes when it reads bytes. Some archives still require MD5. The draft treats MD5 as an extra digest the operator requests, not as a second full read on every scan. The flag for that request is TBD with the other scan parameters.
-4. **BPM-Lite import.** No migration acceptance test until we know whether BPM-Lite data needs to land in a Core catalog.
-5. **License.** The software is released under a permissive license. The SPDX identifier is not chosen. Apache-2.0 is the working assumption when the public repository is published.
-6. **Consent allow-list strictness.** A missing `consent` excludes a node from a Govern release. Confirm that this is the institutional default, including for catalogs that mix human and non-human data.
+3. **BPM-Lite import.** No migration acceptance test until we know whether BPM-Lite data needs to land in a Core catalog.
+4. **Consent allow-list strictness.** A missing `consent` excludes a node from a Govern release. Confirm that this is the institutional default, including for catalogs that mix human and non-human data.
