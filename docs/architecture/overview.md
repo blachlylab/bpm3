@@ -1,0 +1,587 @@
+# BPM Architecture Overview
+
+**Status:** Draft 0.1
+**Date:** 2026-09-30
+**Companion:** [Product requirements](../product/prd.md)
+
+This document records the implementation choices behind the product requirements. Behavior lives in the PRD. Where a mechanism is visible to an operator, the PRD is the contract and this document says how it is met. Sections the PRD marks deferred or unstable are marked the same way here.
+
+The Cargo package is still named `bpm3`. The binary target is `bpm` (`cargo build` writes `target/debug/bpm`). Renaming the package is a later cleanup.
+
+## 1. Stack
+
+| Layer | Choice | Role |
+| --- | --- | --- |
+| Language | Rust, edition 2024 | One static binary. Memory safety for a program that handles human-subjects metadata. |
+| CLI | Clap 4, derive API | The `bpm` vocabulary in the PRD. |
+| Catalog store | DuckDB, embedded, via the `duckdb` crate with the bundled engine | One file per catalog. Analytical scans over millions of file and metadata rows. No separate database process in Core. |
+| HTTP | Axum | Local `bpm serve`. `bpmd` is PRD §5, which is unstable. |
+| HTML | Askama templates, HTMX attributes in those templates | Server-rendered pages. Partials swap into the existing page. |
+| Front-end assets | HTMX, the compiled stylesheet (Tailwind CSS and DaisyUI), and any other JS or CSS | Vendored in the repository under `assets/vendor/`. A build embeds those files and does not download them. Regenerating the stylesheet is optional and its output is committed back. |
+
+JS, CSS, and the HTMX runtime are vendored into the tree. The `bpm` binary embeds the copies under `assets/vendor/`.
+
+Identity providers and the policy-review client were sketched for Govern. PRD §5 is **UNSTABLE / TBD**, so they are not stack decisions yet.
+
+Core dependencies stay on the library side of a trait so that Clap types and Axum types never appear in catalog code.
+
+## 2. Two shapes, one library
+
+```
+┌────────────┐     in process      ┌──────────────────────────┐
+│  bpm CLI   │────────────────────▶│                          │
+└────────────┘                     │  bpm-core                │
+┌────────────┐     in process      │  model, catalog trait,   │
+│ bpm serve  │────────────────────▶│  query (v1 read-only)    │
+│  Axum+HTMX │                     │                          │
+└────────────┘                     └────────────┬─────────────┘
+                                                │
+                                                ▼
+                                      catalog file (DuckDB)
+
+Later:
+
+┌────────────┐  HTTP or gRPC, trait ┌─────────────┐     ┌──────────────────┐
+│  bpm CLI   │─────────────────────▶│    bpmd     │────▶│ catalog files    │
+└────────────┘                      │  Axum+HTMX  │     │ + operations DB  │
+                                    │  auth, audit│     └──────────────────┘
+                                    │  policy     │
+                                    └─────────────┘
+```
+
+The top half is Core. The CLI calls the catalog trait in-process. `bpm serve` in v1 calls the read-only query side of that trait in-process. The lower half is `bpmd` and is **UNSTABLE / TBD**, matching PRD §5. If it is built, it is a second binary in this repository linking the same library, not a second data model.
+
+The interface between `bpm` and `bpmd` is that trait over a network. The transport is not chosen. It may be HTTP. It may instead be gRPC, or something similar, which might be far more efficient for large binary data. The browser UI is separate: the sketch still serves it with Axum and HTMX, and the CLI does not have to use that HTTP stack to call the trait.
+
+### Crate and module boundary
+
+The first code can live in one Cargo package. The boundary that matters is the module boundary, so a later split into crates is a move rather than a rewrite.
+
+| Module | May depend on | Must not depend on |
+| --- | --- | --- |
+| `model` | std, serde | clap, axum, duckdb |
+| `catalog` | `model`, duckdb behind the trait implementation | clap, axum |
+| `ingest` | `model`, filesystem | clap, axum, SQL strings from the CLI |
+| `query` | `model`, `catalog` trait | clap, axum |
+| `cli` | clap, the traits | axum, duckdb (it sees the trait, not the engine) |
+| `web` | axum, askama, the traits, vendored assets | clap, duckdb |
+
+`ingest` implements both `bpm ingest` and `bpm scan`, and v1 calls it from the CLI only. The read-only web UI does not ingest or scan. HTML handlers format the same query structs the CLI prints. They do not grow a second query language. `manifest` and `import` are PRD §4.9 and §4.10, which are unstable, so they are not modules in the settled layout.
+
+The DuckDB implementation is the only module that embeds SQL for catalog mutations. Query methods on the trait (`entities_under`, `files_under`, `summary`) are the unstable sketch in §7 and PRD §4.8. `impact` and `lineage` wait for PRD §4.7.
+
+## 3. The catalog trait
+
+The trait is the reuse seam. Names here are conceptual; Rust signatures can follow the code style of the repo when the trait is written.
+
+| Operation group | What it covers |
+| --- | --- |
+| Catalog | Open, migrate to latest, catalog id, label |
+| Entities | Create, rename, reparent, delete, cascade delete |
+| Metadata | Set, unset, list, on entities and on files |
+| Observations | Apply one ingest batch: new locations, sizes, mtimes, fingerprints. Consult existing rows only for a duplicate |
+| Digests | `bpm scan` stores BLAKE3 when it reads bytes, or the backend's checksum when that backend supplies one and the body is not downloaded. Acknowledge starts a new generation and clears every current digest for that file |
+| Links | Link, unlink, role. No primary flag |
+| Derivations | **Deferred (PRD §4.7).** Derived-from edges and the walks |
+| Query | **Unstable (PRD §4.8).** Entity, file, and summary queries |
+| Manifest | **Unstable (PRD §4.10).** Canonical body, content id, snapshot id |
+| History | **Deferred (PRD §4.7).** Command notebook |
+| SQL | Read-only by default. Implemented for the local DuckDB catalog only. `--write` does not record history until §4.7 |
+
+A `Catalog` value in Core is `LocalDuckDb`. The CLI resolves the file by the PRD order: `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.duckdb`. A remote implementation is part of Govern and is **UNSTABLE / TBD** with PRD §5. Its transport is not chosen; see §2.
+
+Errors are typed enough that the CLI and the web UI can share messages: illegal parent, sibling name taken, catalog busy, path outside the ingest root. The UI does not parse English error strings.
+
+### Remote trait constraints
+
+**UNSTABLE / TBD (PRD §5).**
+
+A remote client would implement the same groups except SQL, on whichever transport §2 settles. The server rejects a SQL call so an arbitrary statement cannot bypass a future policy filter.
+
+Remote ingest and scan still run against storage the client can see, or against storage the server can see. The first Govern deployment, if it is built, assumes `bpmd` and the data share a filesystem namespace, which matches a core facility or a lab server. Object-store locations are the later Core milestone in PRD §3, and this sketch does not define them. A laptop pushing observations of paths the server cannot read is a later mode: the client would upload the scan batch (paths, sizes, mtimes, fingerprints, digests) and the server would apply it through the same batch operation. The trait's batch operation is what makes that mode possible without a second ingestion path. It is not part of the Core release to expose that batch endpoint publicly.
+
+## 4. Local process model
+
+- One `bpm` process opens one catalog per invocation.
+- `bpm serve` in v1 holds a read-only connection. It does not take the write lock and it cannot mutate the catalog.
+- DuckDB allows many readers and one writer. BPM takes an exclusive advisory lock on a sibling lock file for the duration of a write transaction (`<catalog>.lock` next to the DuckDB file). Readers, including `bpm serve`, do not take it.
+- A writer that cannot acquire the lock within a few seconds exits with "catalog is busy", naming the lock file. It does not queue silently.
+- Ingest commits in batches of 1,000 new files. A crash or a lock loss keeps a committed prefix. The next ingest continues. Batch size is an internal parameter.
+- Read-write actions from the web UI are Core v2 and are TBD. They are not in v1.
+
+Catalog files and `~/.bpm` are created with mode `0600` for files and `0700` for directories. The embedded engine does not add its own encryption. Disk encryption is the operator's, or the institution's, responsibility. The PRD's statement that anyone who can read the file can read the metadata is this choice.
+
+### User config
+
+`~/.bpm/context.toml` may record named catalogs. It has no `current` key, and a command never opens a catalog because the file names it. Resolution stays `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.duckdb`. A remote catalog entry, and `bpm use`, belong to Govern and are **UNSTABLE / TBD** (PRD §5 and the `*` rows in PRD §4.13). The `bpm serve` token is `--token` or `BPM_TOKEN`. It is not written into this file.
+
+```toml
+[catalogs.cll]
+kind = "local"
+path = "/Users/me/work/cll/bpm.duckdb"
+
+[catalogs.core]
+kind = "remote"
+url = "https://bpm.example.org"
+catalog = "pathology"
+```
+
+A `~/.bpm/credentials/` directory for Govern refresh tokens is **UNSTABLE / TBD** with PRD §5. The v1 serve login, when a token is configured, is an `HttpOnly` session cookie on `bpm serve` itself.
+
+## 5. Logical schema
+
+Types below are the logical schema. DuckDB is the first physical store. UUID and UTC timestamps are the only non-primitive types. Every UUID the library assigns — catalog id, node id, file id, and the ids in later tables — is a UUIDv7, generated in the library rather than by the database. Foreign keys are declared, and the library checks them in the same transaction, so a weak engine check cannot leave an orphan node. Parent type is a foreign key: each node table points at the table one step up. `(node_type, node_id)` on a link or a metadata row cannot be a foreign key. The library checks that pair on write, and a node delete removes those rows in the same transaction. `bpm sql --write` can still insert a pair whose node is missing.
+
+### catalog_meta
+
+| Column | Notes |
+| --- | --- |
+| key | Primary key. Rows include `catalog_id`, `label`, `created_at`, `schema_version` |
+| value | Text |
+
+`catalog_id` is a UUID assigned at init and stable for the life of the file.
+
+### Node tables
+
+Six tables. Ids follow the UUIDv7 rule above. `created_at` and `updated_at` are UTC on every table. Parent foreign keys use `ON DELETE RESTRICT`.
+
+| Table | Parent | Name |
+| --- | --- | --- |
+| `programs` | none | Required. Unique |
+| `projects` | `program_id` → `programs.id` | Required. Unique among siblings |
+| `cases` | `project_id` → `projects.id` | No name column |
+| `samples` | `case_id` → `cases.id` | No name column |
+| `raw_data` | `sample_id` → `samples.id` | No name column |
+| `analyses` | `raw_data_id` → `raw_data.id` | No name column |
+
+A Sample cannot name a Project: the column `samples.case_id` references `cases` only. Reparent updates that parent column. The foreign key checks the new parent. Rename updates `name` on a Program or Project and does not touch link rows.
+
+A view `entities` is the `UNION ALL` of the six tables, with columns `node_type`, `id`, `parent_id`, and `name` (`name` is null below Project). A filter on `node_type` skips the other branches. The view is not a second store. Catalog reads and ad hoc SQL may use it. Writes go to the typed table. A UUID lookup without a type reads this view, which probes the six primary keys.
+
+Descendant sets are computed by joining these tables along the parent columns. The chain is at most five steps. The schema does not store a closure. Add one only if the benchmark shows that gathering descendant ids, rather than reading link and file rows, is the slow step.
+
+### entity_metadata
+
+| Column | Notes |
+| --- | --- |
+| node_type | `program`, `project`, `case`, `sample`, `raw_data`, or `analysis` |
+| node_id | UUID in the table `node_type` names. Not a foreign key |
+| key | Text. Non-empty. No `:` or `/` |
+| value | Text. Non-empty. No `:` or `/` |
+| updated_at | UTC |
+
+Primary key `(node_type, node_id, key)`. One value per key. An index on `(key, value)` supports the selectors in PRD §4.4. On insert and update the library checks that `node_id` exists in the named table. Deleting a node deletes its metadata rows in the same transaction.
+
+Core does not give any key special behavior. `consent` and `embargo_until` are stored here like any other pair. Govern's reading of them is PRD §5, which is unstable. A later release may give some keys special meaning, including in Core, and may require some of them. That is not in this schema yet.
+
+### file_metadata
+
+| Column | Notes |
+| --- | --- |
+| file_id | Foreign key to `files.id` |
+| key | Text. Non-empty. No `:` or `/` |
+| value | Text. Non-empty. No `:` or `/` |
+| updated_at | UTC |
+
+Primary key `(file_id, key)`. An index on `(key, value)` supports the same selectors against files. File metadata is not stored on `entity_metadata`.
+
+### files
+
+| Column | Notes |
+| --- | --- |
+| id | UUID |
+| size_bytes | Last observed size at a present location, denormalized for query |
+| mtime | Last observed mtime, UTC |
+| fingerprint | Hex, or null when the bytes were not read |
+| fingerprint_scheme | Text, or null when `fingerprint` is null. The first schemes are `xxh3-128-full` and `xxh3-128-sample-v1`. Two fingerprints are compared only when the scheme strings are equal. A new scheme is a new string on newly written rows. Existing rows are not rewritten |
+| created_at | First discovery |
+
+The file id does not depend on the fingerprint. Links, locations, and digests stay valid if the scheme changes or the fingerprint is null. The current digests are rows, not columns, so a computed BLAKE3 and a backend checksum of another algorithm coexist.
+
+### file_digests
+
+| Column | Notes |
+| --- | --- |
+| file_id | |
+| algorithm | `blake3` when BPM reads the bytes. `md5` when the operator requests it. A backend checksum uses the provider's name, such as `sha256` or `xxh3` |
+| digest | Lowercase hex, without the algorithm prefix |
+| source | `computed` or `backend` |
+| generation | Integer, starts at 1 |
+| current | Boolean. One current row per `(file_id, algorithm)` |
+| observed_at | UTC |
+
+The wire form is `algorithm:<hex>`, so a digest BPM computed is `blake3:<hex>`. The prefix is added at the edges, not stored twice.
+
+Acknowledge clears `current` on every digest row for that file, then inserts the digests observed for the new bytes. Older rows stay in place. That is the generation history. There is no separate history table. An algorithm that was not observed again does not remain current.
+
+### file_locations
+
+| Column | Notes |
+| --- | --- |
+| file_id | |
+| backend | `posix` in the first milestone. `s3` and other object stores are a later Core milestone (PRD §3) |
+| uri | Absolute path |
+| first_seen_at, last_seen_at | UTC |
+| last_size, last_mtime | Observation at `last_seen_at` |
+| presence | `present` or `missing` |
+| stat_state | `unchanged`, `changed`, `unknown` |
+| digest_state | `unverified`, `match`, `mismatch` |
+
+Primary key `(backend, uri)`. A path belongs to one file. When a move is confirmed, the old uri is marked `missing` and stays until the operator deletes that location. A second present path with the same digest inserts a second location row for the same `file_id`.
+
+`backend` is a column from the first migration so an object-store URI can be added without a new identity model. The first milestone writes `posix` only. Remote object stores, including S3, are a later Core milestone (PRD §3), not a Govern feature.
+
+### file_links
+
+| Column | Notes |
+| --- | --- |
+| file_id | Foreign key to `files.id` |
+| node_type | Same six names as `entity_metadata` |
+| node_id | UUID in the table `node_type` names. Not a foreign key |
+| role | Text |
+
+Primary key `(file_id, node_type, node_id)`. An index on `(node_type, node_id)` serves "files on this node" and cascade delete. `files` has no node column. Ingest writes `files` and `file_locations` only. Zero link rows is an unlinked file, which is normal after ingest. Two link rows attach one file id to two nodes. The library checks that `node_id` exists on insert. A delete with link rows still present fails. `--cascade` deletes the descendant nodes, their link rows, and their `entity_metadata` rows, and leaves the file rows. No primary-link column. That flag is undefined until the product gives it behavior.
+
+### file_derivations
+
+**Deferred (PRD §4.7).** The table below is the sketch. It is not part of the settled schema.
+
+| Column | Notes |
+| --- | --- |
+| output_file_id, input_file_id | Primary key |
+| recorded_at | UTC |
+
+Cycles are rejected in the library when an edge is recorded, by walking ancestors of the input. The walk is bounded by the edge count of the two files' connected component.
+
+### ingest_runs and scan_runs
+
+Ingest and scan are different commands, so their run logs are different tables with the same columns: id, backend, root_uri (empty when a scan has no path), started_at, finished_at, status (`running`, `complete`, `incomplete`), files_seen, files_created (ingest only). Errors are rows of run id, uri, and message.
+
+A run left `running` by a crash is `incomplete` the next time a process opens the catalog and finds no live lock from that run. Running the command again is the recovery. Individual file batches are already committed. Ingest does not mark missing paths. Scan does.
+
+### manifests
+
+**Unstable (PRD §4.10).** The table below is the sketch. It is not part of the settled schema.
+
+| Column | Notes |
+| --- | --- |
+| id | UUID |
+| content_id | Hex of the canonical content body |
+| snapshot_id | Hex of the snapshot body |
+| content_body | Canonical JSON |
+| snapshot_body | Canonical JSON including locations and drift |
+| selector | JSON of the filters that were asked for |
+| created_at | UTC |
+
+Unique on `content_id`. A request that canonicalizes to an existing content body returns the stored row. When the content matches and the newly computed snapshot differs, the command returns the stored `content_id` and prints the new snapshot hash, and leaves the stored snapshot in place. `--refresh-snapshot` updates `snapshot_body` and `snapshot_id` on that row and leaves `content_id` and `content_body` alone. That refresh is the only update a manifest row accepts. It records a storage move without minting a second scientific object.
+
+A partial materialize writes its report next to the staged files. It does not add a column to this table and does not rewrite `content_body`.
+
+### command_history
+
+**Deferred (PRD §4.7).** The table below is the sketch. `bpm sql --write` does not append a row until this milestone exists.
+
+| Column | Notes |
+| --- | --- |
+| id | Integer |
+| at | UTC |
+| os_user | The local user name. Not an authenticated identity |
+| cwd | |
+| catalog_id | |
+| action | Argv for CLI, or a stable verb plus object ids for a UI action |
+
+Append-only through the library. No update method is exposed.
+
+### What is computed, not stored
+
+Possible duplicates (same size, same fingerprint scheme and value, different file id, no shared current digest of the same algorithm) are a query over `files` and `file_digests`. Drift filters are a query over `file_locations`, using the operator states in §6. Descendant sets are a join along the node-table parent keys, not a stored closure. A Govern release would compute effective policy from the tree at decision time and copy it into the release record. That step is PRD §5, which is unstable. Core does not compute it.
+
+## 6. Ingest, scan, fingerprint, and digest
+
+### Fingerprint
+
+The fingerprint is a fast candidate filter. It is not part of the file id, and a catalog remains valid if the scheme changes or a row has none.
+
+| File size | Scheme name | Bytes hashed |
+| --- | --- | --- |
+| ≤ 64 MiB | `xxh3-128-full` | The entire file |
+| > 64 MiB | `xxh3-128-sample-v1` | A length-prefixed sample: the file size as an 8-byte little-endian integer, then the first 1 MiB, 1 MiB centered on the midpoint, and the last 1 MiB. Short reads at the ends use the bytes that exist. |
+
+XXH3-128 is the first hash, not a permanent choice. The scheme name is stored on the row that carries that fingerprint. Two fingerprints are compared only when those strings are equal. A different scheme, or a null fingerprint, is not evidence that the bytes differ. Confirmation is a digest comparison. Fingerprint equality never merges file ids.
+
+The 64 MiB cutoff and the 1 MiB windows belong to `xxh3-128-sample-v1`. Tests pin that name to that layout. A different cutoff or window is a new scheme name. Rows already stored keep the name they were written with. No migration rewrites them, and opening the catalog does not recompute them.
+
+### Full digest
+
+The digest BPM computes by reading bytes is BLAKE3, algorithm `blake3`, wire form `blake3:<hex>`. Digests are stored as lowercase hex. Comparison is case-insensitive on input and lowercase on output.
+
+On a posix location, `bpm scan` streams each selected location once through BLAKE3. Ingest reads a whole file only to test a duplicate: same size, same fingerprint scheme, and same fingerprint as a file already in the catalog. It hashes the new path and, when the existing file has no BLAKE3, that file's current bytes too. Matching BLAKE3 values add a location.
+
+An MD5 stream is a second pass, only when the operator requests MD5. The flag for that request is TBD.
+
+### Backend checksums
+
+Some backends charge for a body download and also publish a checksum. S3 is the case this rule is written for. It stores one of ten checksums with the object. The ten include SHA-256 and XXH3. Ingest and scan trust the checksums the backend returns and do not download the body.
+
+Each returned checksum is a `file_digests` row with `source = backend` and the provider's algorithm name. Size comes from the listing or from HEAD. A matching size and a matching current digest of the same algorithm add a location, with no download. If the backend returns no checksum, the object becomes a new file id. The same size as an existing file, with no comparable digest, is a possible duplicate and is not merged.
+
+Downloading the body is an explicit flag on `bpm ingest` and on `bpm scan`. The spelling is TBD. With the flag, BPM streams the body, stores BLAKE3 with `source = computed`, and on ingest of a new object also stores a fingerprint. A posix location has no provider checksum, so those commands read bytes without that flag.
+
+Drift against a trusted checksum compares what the backend returns now with the stored digest of that algorithm. A locally computed BLAKE3 is compared on its own row. `digest_mismatch` is set when any algorithm compared on that scan disagrees. `ok` requires every algorithm compared on that scan to match, or records the digest the first time one is stored.
+
+### Path filters
+
+The denylist and the whitelist apply to the ingest walk and to which existing locations a scan checks. They do not delete a catalog row that a later filter would have skipped.
+
+The default denylist is the file names `.DS_Store` and `Thumbs.db`. The operator can change the list. Where that configuration lives — a flag, a file, or the catalog — is TBD. Disabling the denylist skips nothing by name.
+
+The whitelist is zero or more glob patterns. With none set, every path that survives the denylist is eligible. With one or more set, a path must match at least one pattern and must not be denied. `*` does not cross `/`. `**` does. On ingest the pattern is matched against the path relative to the walk root. On scan it is matched against the location path relative to the scan root, or against the full URI when the scan covers a whole backend.
+
+### Ingest walk
+
+1. Resolve the pathspec to a canonical directory. Refuse to start if it is not a directory.
+2. Walk depth-first. Skip directory symlinks whose canonical target is outside the root, and record them as ingest errors of class `outside_root` (reported, not fatal). Skip symlink cycles.
+3. Follow a symlink to a regular file. The walked path and the canonical path are two location candidates when they differ.
+4. Apply the denylist and the whitelist.
+5. Skip any path whose `(backend, uri)` is already a location. Do not stat it for drift and do not hash it.
+6. For each new regular file on a posix backend, record size, mtime, and fingerprint. If size, scheme, and fingerprint match an existing file, run the duplicate consultation above. On a checksum-bearing object backend, record size and the backend checksums, and skip the body unless the download flag is set.
+7. A path that cannot be read, when a read was required, is an error and receives no fingerprint.
+8. Write the ingest row as `complete`, or `incomplete` if any batch failed.
+
+Ingest does not mark absent paths `missing`. That is scan.
+
+Directory walk parallelism is an implementation choice. Batches of 1,000 files stay the commit boundary. The first implementation may be single-threaded.
+
+### Scan
+
+Scan does not walk for new files. It selects location rows, applies the denylist and the whitelist, and stats what remains. A posix location is streamed through BLAKE3. A checksum-bearing object location is checked from the checksums the backend returns, and the body is downloaded only when the flag is set.
+
+| Invocation | Locations selected |
+| --- | --- |
+| `bpm scan` | Every location in the catalog, after the path filters |
+| `bpm scan s3` | Locations whose backend is `s3`, after the path filters. A file that also has a `posix` location is not checked there |
+| `bpm scan /data/run42` | Local-backend locations under that path, after the path filters |
+
+The `s3` row is the selection rule for the later object-store milestone. The first milestone records only `posix` locations, so that invocation selects nothing until the backend exists. A path with no backend is the local filesystem in every milestone.
+
+A missing URI sets `presence` to `missing`. A size or mtime change sets `stat_state` to `changed`. The fingerprint is recomputed only when the bytes are read. The digest comparison is independent, per algorithm, as in the backend-checksum rule above. Operator filters read these columns, so one location can be both `stat_changed` and `digest_mismatch`.
+
+| Operator state | Columns |
+| --- | --- |
+| `missing` | `presence = missing` |
+| `stat_changed` | present, and `stat_state = changed` |
+| `digest_mismatch` | `digest_state = mismatch` |
+| `ok` | present, `stat_state = unchanged`, and `digest_state = match` |
+
+Scan does not merge file ids. Merging a duplicate path onto an existing file id happens during ingest.
+
+### Object storage later
+
+Remote object stores, including S3, are a later Core milestone (PRD §3). They use the same file id and the same drift states as a filesystem location. The first milestone writes `posix` only. No acceptance test in that milestone covers S3. The backend half of PRD §4.15 scenario 15 runs when a second backend exists.
+
+A new backend implements "list objects under a prefix, including size and any checksums" and, when a body read is required, "open a stream". It emits the same observation records. `file_locations.backend` and `uri` already distinguish a posix path from, for example, `s3://bucket/key`. The default for a backend that publishes checksums is to trust them. The download flag is what requests a local BLAKE3.
+
+## 7. Query (UNSTABLE)
+
+**Unstable (PRD §4.8).** `bpm query` is marked `*` in PRD §4.13. The methods and flag spelling below are a working sketch. `bpm sql`, in the next subsection, is a Core command and is outside this mark.
+
+Semantic query methods compile to DuckDB SQL inside the DuckDB catalog implementation. They use explicit column lists and ordinary joins. DuckDB-only syntax stays inside this module so a Postgres implementation can replace the function bodies without changing callers.
+
+The sketch uses `entities_under`, `files_under`, and `summary`. `impact` and `lineage` wait for PRD §4.7 and are not in this module yet.
+
+Entity `--under` joins down the parent foreign keys from the addressed node and includes that node. File `--under` joins that set to `file_links` on `(node_type, node_id)`. A Program or Project is addressed by path. A Case, Sample, Raw Data, or Analysis is addressed by UUID, which the `entities` view resolves, or by a metadata path that matches exactly one node.
+
+Metadata selectors are the three forms in PRD §4.4: `key:value`, `key:` (that key is present), and `:value` (that value is present on any key). A pair or a key-present selector is an index lookup on `entity_metadata (key, value)` or `file_metadata (key, value)`. The entity lookup returns `(node_type, node_id)` and then opens that table. A value-only selector that does not also fix the type reads every branch of the `entities` view. Values compare as strings. Repeated selectors are a conjunction. Core does not parse `embargo_until` as a date. A Govern reading of that key is PRD §5, which is unstable.
+
+The flag spelling of `bpm query` is the working sketch in PRD §4.8. The flags can change without a new schema.
+
+`summary` is a handful of grouped aggregations. The benchmark (PRD §4.15 scenario 31) times `files --under` a Project-sized subset and `entities --where` a selective key.
+
+### SQL
+
+`bpm sql` is local only. The default connection is read-only, so a stray write cannot succeed. `--write` opens a writable transaction and runs the statement. It does not append a `command_history` row. That recording waits for PRD §4.7. A statement the engine rejects rolls back and leaves the catalog unchanged.
+
+### Canonical manifest JSON
+
+**Unstable (PRD §4.10).** The layout below is the sketch in that section. It is not a settled format. Derived-from pairs in a manifest also wait for PRD §4.7.
+
+Content body, key order alphabetical, arrays ordered as specified:
+
+- `catalog_id`
+- `entities`: `node_type`, id, path when the node has one, metadata map. Tree order: Programs and Projects by path, then remaining nodes by parent id and UUID
+- `files`: id, digests (algorithm-tagged), size, links `{node_type, node_id, role}`, `unhashed`, in file-id order
+- `derivations`: `{output, input}` pairs among included files, in output id then input id order
+
+Links carry `node_type` and `node_id` because that pair is how a link names a node, and because Case, Sample, Raw Data, and Analysis have no path. A fingerprint is not an input to `content_id`.
+
+Snapshot body is the content body plus, on each file, `locations` (backend, uri, presence, stat_state, digest_state) and the file's current drift summary.
+
+`content_id` is SHA-256 of the canonical content bytes. `snapshot_id` is SHA-256 of the canonical snapshot bytes. Both are lowercase hex.
+
+## 8. Web UI
+
+`bpm serve` binds `127.0.0.1:3000` unless overridden. Resolution order is the flag, then the environment variable, then the default.
+
+| Setting | Flag | Environment variable | Default |
+| --- | --- | --- | --- |
+| Host | `--host` | `BPM_HOST` | `127.0.0.1` |
+| Port | `--port` | `BPM_PORT` | `3000` |
+| Token | `--token` | `BPM_TOKEN` | unset |
+
+If `--host` or `BPM_HOST` is set and neither token source is set, the process exits before binding. When a token is set, a login page posts the operator's entry and compares it to the configured value. A match sets an `HttpOnly` session cookie. A mismatch renders the login page again. The token is not logged and not stored in the catalog. With no token configured, the catalog routes are open, which is allowed only on the default host.
+
+Core v1 opens the catalog read-only. Handlers are GET routes and return HTML. HTMX requests return a template partial.
+
+| Route | Page |
+| --- | --- |
+| `GET /` | Home summary |
+| `GET /login` | Token form, only when a token is configured |
+| `GET /tree`, `GET /entities/{id}` | Tree and entity, read-only |
+| `GET /files/{id}` | File detail: id, fingerprint, digests, locations, drift, and links. Derived-from waits for PRD §4.7 |
+| `GET /search` | Query form and results partial. Filter spelling is the PRD §4.8 sketch |
+
+Core v2 is the read-write UI. Its routes and behavior are TBD. v1 does not register POST handlers that mutate the catalog, including metadata edits, acknowledge, ingest, scan, and manifest build. The login form may POST the token. That request does not write the catalog.
+
+Assets are the files committed under `assets/vendor/`: the HTMX runtime, the compiled Tailwind and DaisyUI stylesheet, and any other JS or CSS the pages use. The binary embeds those copies with `rust-embed` or `include_bytes!`. A build does not download them. Regenerating the stylesheet is optional, and the new file is committed back. Templates are Askama and compiled into the binary.
+
+A startup log line states the bind address. It does not state the token.
+
+## 9. CLI
+
+Clap 4 derive parser. The binary name is `bpm`. The subcommands Core implements are the rows in PRD §4.13 whose Unstable cell is empty. `--catalog` is a global argument. `--format` applies to commands that print rows. On `bpm query` the flag set is still the §4.8 sketch.
+
+Output goes to stdout. Diagnostics go to stderr. Exit status is `0` on success and non-zero on a rejected command.
+
+`bpm login`, `bpm logout`, and `bpm use` are marked `*` in PRD §4.13. Core does not register them. The token typed into `bpm serve` is not `bpm login`. When a Govern client exists, those commands with no server configured fail with a short message, and they do not report that a login succeeded.
+
+A partial materialize that exits non-zero, writes a report beside the staged files, and leaves the manifest content body unchanged is the §4.10 sketch. It is not settled CLI behavior.
+
+## 10. Govern seams
+
+**UNSTABLE / TBD (PRD §5).** Everything in this section is the sketch kept next to that part of the PRD. It is not a Core design. Core does not build these modules, this database, or this remote API. The HTTP routes below are one transport sketch. Section 2 also leaves gRPC, or something similar, open.
+
+The sketch adds modules. It does not fork `model`.
+
+| Module | Responsibility |
+| --- | --- |
+| `auth` | OIDC code flow, PKCE, client credentials, session cookie |
+| `rbac` | Role bindings per catalog, union of permissions, checks in middleware |
+| `audit` | Append-only events in the operations database |
+| `policy` | Pure function from a catalog snapshot plus a release's allow-list and cutoff to included, excluded, and impacted sets |
+| `release` | State machine `draft → in_review → approved → materialized → revoked` |
+| `review` | `PolicyReviewer` trait. First implementation calls the xAI API from the server |
+
+The policy function reads entities, the metadata keys the sketch interprets (`consent` and `embargo_until`; further keys may be added later), file links, and derivations. It does not stat files and it does not call the model provider. Given the same snapshot and the same allow-list, it returns the same sets. A file stays in the package when any link the release uses attaches it to an included entity. It is withheld when every such link hangs off an excluded entity. A document linked to both a Project and a Case remains with the Project when that Case is excluded. Files outside the selection that are forward-reachable through derived-from from an excluded file are impacted and listed apart from ordinary exclusions. Tests for the Govern acceptance scenarios would run against this function with an in-memory or DuckDB fixture, without standing up OIDC. Those scenarios are PRD §5.8 and are not Core tests.
+
+The AI reviewer receives the decision report and the policy text. Its output is stored as an artifact on the release. The approve transition checks the caller's role. It does not check that a review exists, so an officer can approve a small release without the model. The UI can require the review as a form of local policy later; the first rule is the role check, because a model outage must not trap a release.
+
+### Operations database
+
+`bpmd` keeps a second DuckDB file, the operations database, separate from every catalog:
+
+| Table | Contents |
+| --- | --- |
+| users | OIDC subject, display name, email |
+| service_accounts | OAuth client id |
+| role_bindings | user or service account, catalog id, role |
+| sessions | web sessions |
+| audit_events | the PRD audit fields |
+| catalogs | registered catalog id, filesystem path, label |
+| releases | state, selector, allow-list, cutoff, decision report, manifest content id, reviewer artifact |
+| release_recipients | release id, name, institution, contact, destination description, materialized_at |
+| policy_documents | catalog or program scope, text body, content hash |
+
+Catalog *contents* stay in the per-initiative DuckDB file. The operations database stores the catalog's path and id so the server can open it. Role checks happen before any catalog call.
+
+This split is what the planning decision called "one DuckDB file per catalog, plus users and audit in a side database".
+
+### Trust boundary
+
+Authenticated actions go through `bpmd`, which writes audit events and is the only principal that should be able to open the files. A process that opens a catalog DuckDB directly skips auth, policy, and audit. The deployment consequence is filesystem permissions: the catalog directory and the operations database are owned by the `bpmd` account, mode `0700` / `0600`. The architecture does not claim the database engine enforces row-level security.
+
+OIDC authenticates. BPM's `role_bindings` table authorizes. Mapping an IdP group claim into a role is not part of the first Govern cut. An Admin assigns roles after the first login creates the user row.
+
+### HTTP shape for the remote trait
+
+This is the sketch if the transport is HTTP. Section 2 does not choose that. gRPC or something similar remains open and might carry large binary data more efficiently. In this HTTP sketch the routes are resources, not an argv tunnel. The CLI builds the same structs it would pass to `LocalDuckDb` and the remote client posts them.
+
+| Method and path | Trait group |
+| --- | --- |
+| `GET /api/catalogs` | list catalogs the caller may see |
+| `POST /api/entities` | create |
+| `PATCH /api/entities/{id}` | rename, reparent, metadata |
+| `POST /api/ingests` | apply an ingest batch of new locations |
+| `POST /api/scans` | apply digest and drift observations for locations already in the catalog |
+| `POST /api/files/{id}/digests` | store a digest |
+| `POST /api/links` | link |
+| `POST /api/derivations` | derive |
+| `POST /api/query` | semantic query |
+| `POST /api/manifests` | build a manifest from a selector |
+| `POST /api/releases` | Govern only |
+
+The localhost UI does not go through these routes. It calls the trait. Keeping one HTTP API for the remote CLI and for `bpmd`'s own later needs is enough. Adding a second internal HTTP hop in `bpm serve` would only obscure errors.
+
+## 11. Migrations, tests, and the benchmark
+
+Schema version lives in `catalog_meta.schema_version`. On open, the library runs ordered SQL migrations embedded in the binary until the stored version matches the code. Migrations are forward-only in Core. A catalog written by a newer binary is refused by an older binary with a message that names both versions.
+
+Core has no operations database. When that database exists, under the unstable Govern sketch, it migrates the same way with its own version.
+
+Tests:
+
+| Kind | What it covers |
+| --- | --- |
+| Model unit tests | Program and Project names, parent foreign keys, path formatting, rejection of `:` and `/` in metadata keys and values, rejection of a link or metadata row whose `(node_type, node_id)` is missing |
+| Catalog integration tests | The PRD §4.15 scenarios that are not marked deferred or unstable, each against a temporary DuckDB file |
+| Ingest and scan fixtures | Directories of small files, a symlink, an unreadable file, a simulated move, a second path with the same bytes |
+| Later milestones | Canonical manifest JSON and `--refresh-snapshot` when PRD §4.10 is finalized. Cycle rejection on derived-from edges when PRD §4.7 is built |
+| Policy unit tests | Govern acceptance items 4–7, on the pure function, when that module exists. PRD §5 is unstable, so these are not Core tests |
+| Benchmark | Synthetic 1,000,000-file catalog, timed queries from PRD scenario 31. Not part of the default `cargo test` run |
+
+The benchmark builds rows with the library's insert path or a bulk loader that writes the same schema, so it measures the real tables. It is a binary under `cargo bench` or an example, and it prints elapsed times. It does not fail the build on a threshold in the first cut, because developer laptops vary. The threshold becomes a gate when there is a reference machine.
+
+## 12. Postgres, when it is actually needed
+
+DuckDB is the catalog store for Core. The Govern sketch (PRD §5, unstable) also starts on DuckDB, with a side operations database. Postgres is the exit when any of these become operational requirements:
+
+- more than one server process must write the same catalog at the same time
+- point-in-time recovery has to be handled by the database rather than by file backups of the DuckDB files
+- row-level security has to be enforced inside the database, because filesystem permissions around the server process are no longer a sufficient trust boundary
+- the operators who will run it already back up Postgres and will not operate a file-per-catalog layout
+
+Until then, adding Postgres adds a service the single-binary story was meant to avoid, and it splits every development setup. Postgres is not a dependency of Core.
+
+The insulation is the catalog trait plus the discipline that DuckDB-only SQL stays inside the DuckDB module. The logical schema in section 5 maps onto ordinary Postgres tables: UUID, text, timestamps, booleans, and foreign keys up the node chain. The polymorphic `(node_type, node_id)` columns are ordinary text and UUID there too. LIST types, ASOF joins, and DuckDB-specific pragmas do not appear in migrations. Tables marked deferred or unstable in section 5 are not part of that mapping until their milestone is finalized.
+
+A migration to Postgres would be a second implementation of the trait and a one-time copy from each DuckDB file into tables keyed by `catalog_id`. An operations database, if Govern is built, can move on a different day than the catalogs. A later remote client would not change, because it talks to the trait.
+
+In the Govern sketch, audit can stay an append-only table in whichever engine holds the operations database. A hash chain over audit rows is an extra integrity measure, not a prerequisite for those scenarios. Whether to add one is open question 1. It is not a Core decision.
+
+## 13. Decisions
+
+| Topic | Decision |
+| --- | --- |
+| Binary | Cargo package remains `bpm3`. The binary target is `bpm`. |
+| Process | One library, called in-process by `bpm` and `bpm serve`. A second binary, `bpmd`, is PRD §5, which is unstable. |
+| Store | Embedded DuckDB, one file per catalog. A side operations database is the Govern sketch, not a Core dependency. |
+| Seam | A catalog trait of semantic operations. The remote transport is not chosen: HTTP, or gRPC or similar (§2). SQL is local-only, and `--write` does not record history until PRD §4.7. |
+| Nodes | Six tables. Each parent column is a foreign key to the table one step up, `ON DELETE RESTRICT`. `name` is a column on `programs` and `projects` only. Descendant queries join those parent keys. No closure table. |
+| Attachments | One `files` table, with no node column. `file_links` and `entity_metadata` use `(node_type, node_id)`. That pair is not a foreign key. The library checks it. Ingest does not write links. |
+| Digests | Rows in `file_digests`, one current row per algorithm, generation column is the history. Acknowledge clears every current digest for the file together. |
+| Fingerprint | First scheme is XXH3-128, named on the row. Nullable. A new scheme does not rewrite existing rows or change file ids. Compared only when the scheme strings match. |
+| Full digest | BLAKE3 when BPM reads bytes. A backend that publishes checksums is trusted, and downloading the body is an explicit flag whose spelling is TBD. MD5 only when asked; that flag is also TBD. |
+| Ingest commit | Batches of 1,000 new files. Advisory lock around writes. Readers, including `bpm serve`, do not take the lock. |
+| Manifest mutation | **Unstable (PRD §4.10).** Sketch: content body immutable. Snapshot may be refreshed in place. |
+| UI | Server-rendered Askama. HTMX, compiled DaisyUI CSS, and any other JS or CSS are vendored under `assets/vendor/` and embedded. Default `127.0.0.1:3000`. v1 is read-only. A non-default host requires a token. |
+| Authz source of truth | **Unstable (PRD §5).** Sketch: BPM role bindings. OIDC proves identity. No IdP group mapping in the first cut. |
+| Policy | **Unstable (PRD §5).** Sketch: pure function, snapshotted onto the release. A file on an included entity stays included. Reviewer cannot approve. |
+| Bytes | Never stored in the catalog. Never proxied through the web UI. |
+| Postgres | Documented exit with concrete triggers. Not a dependency of Core. |
+
+## 14. Open technical questions
+
+1. **Hash-chained audit.** Append-only plus file permissions is the current bar. A hash chain is easy to add later and harder to retrofit into an export an auditor already has. Decide before the first production Govern deployment, not before Core.
+2. **Scan from a laptop against a server that cannot see those paths.** The batch operation on the trait allows it. The first Govern deployment does not expose it. Confirm that the first server really shares a filesystem with the data.
+3. **Background ingest and scan in `bpm serve`.** Not part of the read-only v1 UI. If Core v2 starts those operations from the browser, the scheduling design (thread in-process versus a subprocess) is still open.
+4. **Template engine.** Askama is the choice so templates fail at compile time. If partials become awkward, Minijinja is the fallback. Either way, HTMX stays in the HTML.
+5. **Package name.** The binary target is `bpm`. The Cargo package is still `bpm3`. Rename the package when the first modules land.
