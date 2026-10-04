@@ -14,7 +14,7 @@ The Cargo package is still named `bpm3`. The binary target is `bpm` (`cargo buil
 | --- | --- | --- |
 | Language | Rust, edition 2024 | One static binary. Memory safety for a program that handles human-subjects metadata. |
 | CLI | Clap 4, derive API | The `bpm` vocabulary in the PRD. |
-| Catalog store | DuckDB, embedded, via the `duckdb` crate with the bundled engine | One file per catalog. Analytical scans over millions of file and metadata rows. No separate database process in Core. |
+| Catalog store | SQLite, embedded, via the `rusqlite` crate with the bundled engine | One file per catalog. Declared foreign keys, indexed lookups over millions of file and metadata rows, and concurrent readers beside one writer across processes. No separate database process in Core. The choice is [ADR 0001](../adr/0001-sqlite-catalog-store.md). |
 | HTTP | Axum | Local `bpm serve`. `bpmd` is PRD §5, which is unstable. |
 | HTML | Askama templates, HTMX attributes in those templates | Server-rendered pages. Partials swap into the existing page. |
 | Front-end assets | HTMX, the compiled stylesheet (Tailwind CSS and DaisyUI), and any other JS or CSS | Vendored in the repository under `assets/vendor/`. A build embeds those files and does not download them. Regenerating the stylesheet is optional and its output is committed back. |
@@ -37,7 +37,7 @@ Core dependencies stay on the library side of a trait so that Clap types and Axu
 └────────────┘                     └────────────┬─────────────┘
                                                 │
                                                 ▼
-                                      catalog file (DuckDB)
+                                      catalog file (SQLite)
 
 Later:
 
@@ -59,16 +59,16 @@ The first code can live in one Cargo package. The boundary that matters is the m
 
 | Module | May depend on | Must not depend on |
 | --- | --- | --- |
-| `model` | std, serde | clap, axum, duckdb |
-| `catalog` | `model`, duckdb behind the trait implementation | clap, axum |
+| `model` | std, serde | clap, axum, rusqlite |
+| `catalog` | `model`, rusqlite behind the trait implementation | clap, axum |
 | `ingest` | `model`, filesystem | clap, axum, SQL strings from the CLI |
 | `query` | `model`, `catalog` trait | clap, axum |
-| `cli` | clap, the traits | axum, duckdb (it sees the trait, not the engine) |
-| `web` | axum, askama, the traits, vendored assets | clap, duckdb |
+| `cli` | clap, the traits | axum, rusqlite (it sees the trait, not the engine) |
+| `web` | axum, askama, the traits, vendored assets | clap, rusqlite |
 
 `ingest` implements both `bpm ingest` and `bpm scan`, and v1 calls it from the CLI only. The read-only web UI does not ingest or scan. HTML handlers format the same query structs the CLI prints. They do not grow a second query language. `manifest` and `import` are PRD §4.9 and §4.10, which are unstable, so they are not modules in the settled layout.
 
-The DuckDB implementation is the only module that embeds SQL for catalog mutations. Query methods on the trait (`entities_under`, `files_under`, `summary`) are the unstable sketch in §7 and PRD §4.8. `impact` and `lineage` wait for PRD §4.7.
+The SQLite implementation is the only module that embeds SQL for catalog mutations. Query methods on the trait (`entities_under`, `files_under`, `summary`) are the unstable sketch in §7 and PRD §4.8. `impact` and `lineage` wait for PRD §4.7.
 
 ## 3. The catalog trait
 
@@ -86,9 +86,9 @@ The trait is the reuse seam. Names here are conceptual; Rust signatures can foll
 | Query | **Unstable (PRD §4.8).** Entity, file, and summary queries |
 | Manifest | **Unstable (PRD §4.10).** Canonical body, content id, snapshot id |
 | History | **Deferred (PRD §4.7).** Command notebook |
-| SQL | Read-only by default. Implemented for the local DuckDB catalog only. `--write` does not record history until §4.7 |
+| SQL | Read-only by default. Implemented for the local SQLite catalog only. `--write` does not record history until §4.7 |
 
-A `Catalog` value in Core is `LocalDuckDb`. The CLI resolves the file by the PRD order: `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.duckdb`. A remote implementation is part of Govern and is **UNSTABLE / TBD** with PRD §5. Its transport is not chosen; see §2.
+A `Catalog` value in Core is `LocalSqlite`. The CLI resolves the file by the PRD order: `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.db`. A remote implementation is part of Govern and is **UNSTABLE / TBD** with PRD §5. Its transport is not chosen; see §2.
 
 Errors are typed enough that the CLI and the web UI can share messages: illegal parent, sibling name taken, catalog busy, path outside the ingest root. The UI does not parse English error strings.
 
@@ -104,17 +104,20 @@ Remote ingest and scan still run against storage the client can see, or against 
 
 - One `bpm` process opens one catalog per invocation.
 - `bpm serve` in v1 holds a read-only connection. It does not take the write lock and it cannot mutate the catalog.
-- DuckDB allows many readers and one writer. BPM takes an exclusive advisory lock on `<catalog>.lock`, next to the DuckDB file, only for the duration of one write transaction. Readers, including `bpm serve`, do not take it. Walking a directory and hashing bytes do not take it.
-- A writer that cannot acquire the lock within a few seconds exits with "catalog is busy", naming the lock file. It does not queue silently.
+- The catalog runs in SQLite's write-ahead-log mode (`journal_mode=WAL`). Any number of processes can read while one process writes, and each reader sees the last committed state. `bpm serve` keeps reading while `bpm ingest` commits batches in another process.
+- The catalog write lock is SQLite's own. A write transaction starts with `BEGIN IMMEDIATE`, which takes the write lock up front, and holds it only for the duration of that transaction. There is no separate `<catalog>.lock` file. Readers, including `bpm serve`, do not take the write lock. Walking a directory and hashing bytes do not take it.
+- A writer that cannot acquire the lock within a few seconds (`busy_timeout`) exits with "catalog is busy", naming the catalog file. It does not queue silently.
+- Readers keep their transactions short, one per CLI command or per HTTP request. A long-lived read transaction stops the WAL from being checkpointed back into the main file, and the WAL grows until it ends.
+- WAL mode requires every process using the catalog to be on the same host, because readers and the writer coordinate through shared memory (the `-shm` file). The catalog file must live on a local filesystem, not NFS or SMB. The files the catalog describes may live anywhere.
 - Ingest and scan hash a batch of files with the catalog lock released, then take the lock to commit that batch, then release it and hash the next batch. The batch is 1,000 files. That count is internal. A crash keeps every batch already committed. The next run continues.
 - A long run's liveness is a separate file, `<catalog>.run-<id>.lock`, held with an exclusive flock for the whole command. It is not the catalog write lock, so other writers proceed between batches. The kernel releases the flock if the process dies. The next open that finds a run still marked `running`, and that can acquire this flock, marks the run `incomplete` and removes the file.
 - Read-write actions from the web UI are Core v2 and are TBD. They are not in v1.
 
-Catalog files and `~/.bpm` are created with mode `0600` for files and `0700` for directories. The embedded engine does not add its own encryption. Disk encryption is the operator's, or the institution's, responsibility. The PRD's statement that anyone who can read the file can read the metadata is this choice.
+Catalog files and `~/.bpm` are created with mode `0600` for files and `0700` for directories. SQLite creates the `-wal` and `-shm` files beside the catalog with the catalog file's permissions. The embedded engine does not add its own encryption. Disk encryption is the operator's, or the institution's, responsibility. The PRD's statement that anyone who can read the file can read the metadata is this choice.
 
 ### User config
 
-`~/.bpm/context.toml` may record named catalogs. It has no `current` key, and a command never opens a catalog because the file names it. Resolution stays `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.duckdb`. Walk filters do not live in this file.
+`~/.bpm/context.toml` may record named catalogs. It has no `current` key, and a command never opens a catalog because the file names it. Resolution stays `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.db`. Walk filters do not live in this file.
 
 `~/.bpm/config.toml` holds global tool settings. Today that is the denylist, described in §6. A command reads it for those settings. It does not select a catalog.
 
@@ -123,7 +126,7 @@ A remote catalog entry, and `bpm use`, belong to Govern and are **UNSTABLE / TBD
 ```toml
 [catalogs.cll]
 kind = "local"
-path = "/Users/me/work/cll/bpm.duckdb"
+path = "/Users/me/work/cll/bpm.db"
 
 [catalogs.core]
 kind = "remote"
@@ -135,7 +138,26 @@ A `~/.bpm/credentials/` directory for Govern refresh tokens is **UNSTABLE / TBD*
 
 ## 5. Logical schema
 
-Types below are the logical schema. DuckDB is the first physical store. UUID and UTC timestamps are the only non-primitive types. Every UUID the library assigns — catalog id, node id, file id, and the ids in later tables — is a UUIDv7, generated in the library rather than by the database. Foreign keys are declared, and the library checks them in the same transaction, so a weak engine check cannot leave an orphan node. Parent type is a foreign key: each node table points at the table one step up. `(node_type, node_id)` on a link or a metadata row cannot be a foreign key. The library checks that pair on write, and a node delete removes those rows in the same transaction. `bpm sql --write` can still insert a pair whose node is missing.
+Types below are the logical schema. SQLite is the physical store. UUID and UTC timestamps are the only non-primitive types. Every UUID the library assigns — catalog id, node id, file id, and the ids in later tables — is a UUIDv7, generated in the library rather than by the database.
+
+Foreign keys are declared. Each node table's parent column references the table one step up, and every `file_id` column references `files.id`. The library also checks a parent in the same transaction, so an error names the illegal parent instead of reporting a constraint number. `(node_type, node_id)` on a link or a metadata row cannot be a foreign key, because it names one of six tables. The library checks that pair on write, and a node delete removes those rows in the same transaction. `bpm sql --write` can still insert a `(node_type, node_id)` pair whose node is missing. It cannot insert a missing parent id or `file_id`, because `bpm` turns foreign-key enforcement on for that connection too.
+
+### Physical store
+
+These rules are how the logical schema is written in SQLite. They stay inside the SQLite catalog implementation and its migrations.
+
+| Logical type | SQLite column |
+| --- | --- |
+| UUID | `TEXT`, the canonical 36-character lowercase form. Readable in `bpm sql` |
+| UTC timestamp | `TEXT`, ISO 8601 with a `Z` suffix and millisecond precision. Sorts as it reads |
+| Boolean | `INTEGER` with `CHECK (x IN (0, 1))` |
+| Integer, size in bytes | `INTEGER` (64-bit) |
+| Text | `TEXT` |
+
+- Every table is `STRICT`, so a value of the wrong type is rejected instead of being stored as written. A table whose primary key is not a single integer is also `WITHOUT ROWID`, so the primary key is the table's own B-tree and not a second index.
+- Every connection `bpm` opens sets `foreign_keys=ON`, `busy_timeout`, and, on a writer, `journal_mode=WAL` and `synchronous=FULL`. SQLite turns foreign-key enforcement off by default for each new connection. A third-party SQLite shell that does not set it can write rows that break a declared key, the same way it can bypass any library check.
+- `STRICT` needs SQLite 3.37 or later. An older `sqlite3` shell refuses to open the catalog. The bundled engine is far newer.
+- `ANALYZE` (or `PRAGMA optimize`) runs after an ingest or scan that changed many rows, so the planner has the statistics it needs to choose the `(key, value)` indexes.
 
 ### catalog_meta
 
@@ -148,7 +170,7 @@ Types below are the logical schema. DuckDB is the first physical store. UUID and
 
 ### Node tables
 
-Six tables. Ids follow the UUIDv7 rule above. `created_at` and `updated_at` are UTC on every table. Parent foreign keys use `ON DELETE RESTRICT`.
+Six tables. Ids follow the UUIDv7 rule above. `created_at` and `updated_at` are UTC on every table. A parent column is `NOT NULL` and is a foreign key to the table one step up, `ON DELETE RESTRICT`. The library also refuses a delete while children or file links remain, because file links are not a foreign key.
 
 | Table | Parent | Name |
 | --- | --- | --- |
@@ -159,7 +181,7 @@ Six tables. Ids follow the UUIDv7 rule above. `created_at` and `updated_at` are 
 | `raw_data` | `sample_id` → `samples.id` | No name column |
 | `analyses` | `raw_data_id` → `raw_data.id` | No name column |
 
-A Sample cannot name a Project: the column `samples.case_id` references `cases` only. Reparent updates that parent column. The foreign key checks the new parent. Rename updates `name` on a Program or Project and does not touch link rows.
+A Sample cannot name a Project: the column `samples.case_id` references `cases` only. Reparent updates that parent column. The foreign key checks the new parent. Rename updates `name` on a Program or Project and does not touch link rows. `--cascade` deletes in one transaction, leaves first, so `ON DELETE RESTRICT` never sees a parent whose children still exist.
 
 A view `entities` is the `UNION ALL` of the six tables, with columns `node_type`, `id`, `parent_id`, and `name` (`name` is null below Project). A filter on `node_type` skips the other branches. The view is not a second store. Catalog reads and ad hoc SQL may use it. Writes go to the typed table. A UUID lookup without a type reads this view, which probes the six primary keys.
 
@@ -400,7 +422,9 @@ A new backend implements "list objects under a prefix, including size and any ch
 
 **Unstable (PRD §4.8).** `bpm query` is marked `*` in PRD §4.13. The methods and flag spelling below are a working sketch. `bpm sql`, in the next subsection, is a Core command and is outside this mark.
 
-Semantic query methods compile to DuckDB SQL inside the DuckDB catalog implementation. They use explicit column lists and ordinary joins. DuckDB-only syntax stays inside this module so a Postgres implementation can replace the function bodies without changing callers.
+Semantic query methods compile to SQLite SQL inside the SQLite catalog implementation. They use explicit column lists and ordinary joins. SQLite-only syntax stays inside this module so a Postgres implementation can replace the function bodies without changing callers.
+
+Selective queries are index lookups and are fast at the scale in PRD §2. `summary`, the unlinked-file anti-join, and possible-duplicate detection read whole tables. SQLite answers them in roughly half a second to a second on a catalog with 100 million metadata pairs (ADR 0001). That meets the PRD target.
 
 The sketch uses `entities_under`, `files_under`, and `summary`. `impact` and `lineage` wait for PRD §4.7 and are not in this module yet.
 
@@ -486,13 +510,13 @@ The sketch adds modules. It does not fork `model`.
 | `release` | State machine `draft → in_review → approved → materialized → revoked` |
 | `review` | `PolicyReviewer` trait. First implementation calls the xAI API from the server |
 
-The policy function reads entities, the metadata keys the sketch interprets (`consent` and `embargo_until`; further keys may be added later), file links, and derivations. It does not stat files and it does not call the model provider. Given the same snapshot and the same allow-list, it returns the same sets. A file stays in the package when any link the release uses attaches it to an included entity. It is withheld when every such link hangs off an excluded entity. A document linked to both a Project and a Case remains with the Project when that Case is excluded. Files outside the selection that are forward-reachable through derived-from from an excluded file are impacted and listed apart from ordinary exclusions. Tests for the Govern acceptance scenarios would run against this function with an in-memory or DuckDB fixture, without standing up OIDC. Those scenarios are PRD §5.8 and are not Core tests.
+The policy function reads entities, the metadata keys the sketch interprets (`consent` and `embargo_until`; further keys may be added later), file links, and derivations. It does not stat files and it does not call the model provider. Given the same snapshot and the same allow-list, it returns the same sets. A file stays in the package when any link the release uses attaches it to an included entity. It is withheld when every such link hangs off an excluded entity. A document linked to both a Project and a Case remains with the Project when that Case is excluded. Files outside the selection that are forward-reachable through derived-from from an excluded file are impacted and listed apart from ordinary exclusions. Tests for the Govern acceptance scenarios would run against this function with an in-memory SQLite fixture, without standing up OIDC. Those scenarios are PRD §5.8 and are not Core tests.
 
 The AI reviewer receives the decision report and the policy text. Its output is stored as an artifact on the release. The approve transition checks the caller's role. It does not check that a review exists, so an officer can approve a small release without the model. The UI can require the review as a form of local policy later; the first rule is the role check, because a model outage must not trap a release.
 
 ### Operations database
 
-`bpmd` keeps a second DuckDB file, the operations database, separate from every catalog:
+`bpmd` keeps a second SQLite file, the operations database, separate from every catalog:
 
 | Table | Contents |
 | --- | --- |
@@ -506,19 +530,19 @@ The AI reviewer receives the decision report and the policy text. Its output is 
 | release_recipients | release id, name, institution, contact, destination description, materialized_at |
 | policy_documents | catalog or program scope, text body, content hash |
 
-Catalog *contents* stay in the per-initiative DuckDB file. The operations database stores the catalog's path and id so the server can open it. Role checks happen before any catalog call.
+Catalog *contents* stay in the per-initiative catalog file. The operations database stores the catalog's path and id so the server can open it. Role checks happen before any catalog call.
 
-This split is what the planning decision called "one DuckDB file per catalog, plus users and audit in a side database".
+This split is the planning decision: one database file per catalog, plus users and audit in a side database.
 
 ### Trust boundary
 
-Authenticated actions go through `bpmd`, which writes audit events and is the only principal that should be able to open the files. A process that opens a catalog DuckDB directly skips auth, policy, and audit. The deployment consequence is filesystem permissions: the catalog directory and the operations database are owned by the `bpmd` account, mode `0700` / `0600`. The architecture does not claim the database engine enforces row-level security.
+Authenticated actions go through `bpmd`, which writes audit events and is the only principal that should be able to open the files. A process that opens a catalog file directly skips auth, policy, and audit. The deployment consequence is filesystem permissions: the catalog directory and the operations database are owned by the `bpmd` account, mode `0700` / `0600`. The architecture does not claim the database engine enforces row-level security.
 
 OIDC authenticates. BPM's `role_bindings` table authorizes. Mapping an IdP group claim into a role is not part of the first Govern cut. An Admin assigns roles after the first login creates the user row.
 
 ### HTTP shape for the remote trait
 
-This is the sketch if the transport is HTTP. Section 2 does not choose that. gRPC or something similar remains open and might carry large binary data more efficiently. In this HTTP sketch the routes are resources, not an argv tunnel. The CLI builds the same structs it would pass to `LocalDuckDb` and the remote client posts them.
+This is the sketch if the transport is HTTP. Section 2 does not choose that. gRPC or something similar remains open and might carry large binary data more efficiently. In this HTTP sketch the routes are resources, not an argv tunnel. The CLI builds the same structs it would pass to `LocalSqlite` and the remote client posts them.
 
 | Method and path | Trait group |
 | --- | --- |
@@ -538,7 +562,7 @@ The localhost UI does not go through these routes. It calls the trait. Keeping o
 
 ## 11. Migrations, tests, and the benchmark
 
-Schema version lives in `catalog_meta.schema_version`. On open, a writer runs ordered SQL migrations embedded in the binary until the stored version matches the code. Migrations are forward-only. A catalog written by a newer binary is refused by an older binary with a message that names both versions. The procedure, the DuckDB `ALTER TABLE` limits, and the separate problem of the DuckDB storage format are in [Catalog migrations](migrations.md).
+Schema version lives in `catalog_meta.schema_version`. On open, a writer runs ordered SQL migrations embedded in the binary until the stored version matches the code. Migrations are forward-only. A catalog written by a newer binary is refused by an older binary with a message that names both versions. The procedure, the SQLite `ALTER TABLE` limits, and the SQLite file format are in [Catalog migrations](migrations.md).
 
 Core has no operations database. When that database exists, under the unstable Govern sketch, it migrates the same way with its own version.
 
@@ -547,28 +571,28 @@ Tests:
 | Kind | What it covers |
 | --- | --- |
 | Model unit tests | Program and Project names, parent foreign keys, path formatting, rejection of `:` and `/` in metadata keys and values, rejection of a link or metadata row whose `(node_type, node_id)` is missing |
-| Catalog integration tests | The PRD §4.15 scenarios that are not marked deferred or unstable, each against a temporary DuckDB file |
+| Catalog integration tests | The PRD §4.15 scenarios that are not marked deferred or unstable, each against a temporary SQLite file |
 | Ingest and scan fixtures | Directories of small files, a symlink, an unreadable file, a simulated move, a second path with the same bytes |
 | Later milestones | Canonical manifest JSON and `--refresh-snapshot` when PRD §4.10 is finalized. Cycle rejection on derived-from edges when PRD §4.7 is built |
 | Policy unit tests | Govern acceptance items 4–7, on the pure function, when that module exists. PRD §5 is unstable, so these are not Core tests |
-| Benchmark | Synthetic 1,000,000-file catalog, timed queries from PRD scenario 31. Not part of the default `cargo test` run |
+| Benchmark | Synthetic 1,000,000-file catalog, timed queries from PRD scenario 31. Not part of the default `cargo test` run. The engine comparison that chose SQLite is a separate harness in `benches/engine_comparison` |
 
 The benchmark builds rows with the library's insert path or a bulk loader that writes the same schema, so it measures the real tables. It is a binary under `cargo bench` or an example, and it prints elapsed times. It does not fail the build on a threshold in the first cut, because developer laptops vary. The threshold becomes a gate when there is a reference machine.
 
 ## 12. Postgres, when it is actually needed
 
-DuckDB is the catalog store for Core. The Govern sketch (PRD §5, unstable) also starts on DuckDB, with a side operations database. Postgres is the exit when any of these become operational requirements:
+SQLite is the catalog store for Core. The Govern sketch (PRD §5, unstable) also starts on SQLite, with a side operations database. Postgres is the exit when any of these become operational requirements:
 
 - more than one server process must write the same catalog at the same time
-- point-in-time recovery has to be handled by the database rather than by file backups of the DuckDB files
+- point-in-time recovery has to be handled by the database rather than by file backups of the SQLite files
 - row-level security has to be enforced inside the database, because filesystem permissions around the server process are no longer a sufficient trust boundary
 - the operators who will run it already back up Postgres and will not operate a file-per-catalog layout
 
 Until then, adding Postgres adds a service the single-binary story was meant to avoid, and it splits every development setup. Postgres is not a dependency of Core.
 
-The insulation is the catalog trait plus the discipline that DuckDB-only SQL stays inside the DuckDB module. The logical schema in section 5 maps onto ordinary Postgres tables: UUID, text, timestamps, booleans, and foreign keys up the node chain. The polymorphic `(node_type, node_id)` columns are ordinary text and UUID there too. LIST types, ASOF joins, and DuckDB-specific pragmas do not appear in migrations. Tables marked deferred or unstable in section 5 are not part of that mapping until their milestone is finalized.
+The insulation is the catalog trait plus the discipline that SQLite-only SQL stays inside the SQLite module. The logical schema in section 5 maps onto ordinary Postgres tables: UUID, text, timestamps, booleans, and foreign keys up the node chain. The polymorphic `(node_type, node_id)` columns are ordinary text and UUID there too. The SQLite physical types (UUIDs and timestamps as `TEXT`, booleans as `INTEGER`) convert on copy. `STRICT`, `WITHOUT ROWID`, and pragmas are storage details that do not carry over and do not change the logical schema. Tables marked deferred or unstable in section 5 are not part of that mapping until their milestone is finalized.
 
-A migration to Postgres would be a second implementation of the trait and a one-time copy from each DuckDB file into tables keyed by `catalog_id`. An operations database, if Govern is built, can move on a different day than the catalogs. A later remote client would not change, because it talks to the trait.
+A migration to Postgres would be a second implementation of the trait and a one-time copy from each SQLite file into tables keyed by `catalog_id`. An operations database, if Govern is built, can move on a different day than the catalogs. A later remote client would not change, because it talks to the trait.
 
 In the Govern sketch, audit can stay an append-only table in whichever engine holds the operations database. A hash chain over audit rows is an extra integrity measure, not a prerequisite for those scenarios. Whether to add one is open question 1. It is not a Core decision.
 
@@ -578,7 +602,7 @@ In the Govern sketch, audit can stay an append-only table in whichever engine ho
 | --- | --- |
 | Binary | Cargo package remains `bpm3`. The binary target is `bpm`. The package is not renamed: the names `bpm` and `bpm_next` belong to deprecated packages. |
 | Process | One library, called in-process by `bpm` and `bpm serve`. A second binary, `bpmd`, is PRD §5, which is unstable. |
-| Store | Embedded DuckDB, one file per catalog. A side operations database is the Govern sketch, not a Core dependency. |
+| Store | Embedded SQLite in WAL mode, one file per catalog, on a local filesystem. A side operations database is the Govern sketch, not a Core dependency. See [ADR 0001](../adr/0001-sqlite-catalog-store.md). |
 | Seam | A catalog trait of semantic operations. The remote transport is not chosen: HTTP, or gRPC or similar (§2). SQL is local-only, and `--write` does not record history until PRD §4.7. |
 | Nodes | Six tables. Each parent column is a foreign key to the table one step up, `ON DELETE RESTRICT`. `name` is a column on `programs` and `projects` only. Descendant queries join those parent keys. No closure table. |
 | Attachments | One `files` table, with no node column. `file_links` and `entity_metadata` use `(node_type, node_id)`. That pair is not a foreign key. The library checks it. Ingest does not write links. |
@@ -598,4 +622,6 @@ In the Govern sketch, audit can stay an append-only table in whichever engine ho
 1. **Hash-chained audit.** Append-only plus file permissions is the current bar. A hash chain is easy to add later and harder to retrofit into an export an auditor already has. Decide before the first production Govern deployment, not before Core.
 2. **Scan from a laptop against a server that cannot see those paths.** The batch operation on the trait allows it. The first Govern deployment does not expose it. Confirm that the first server really shares a filesystem with the data.
 3. **Background ingest and scan in `bpm serve`.** Not part of the read-only v1 UI. If Core v2 starts those operations from the browser, the scheduling design (thread in-process versus a subprocess) is still open.
-4. **Object-store download flag.** Ingest and scan trust a published checksum and download the body only when asked. The spelling of that flag is deferred until the object-store stage starts.
+4. **One node table.** Merging the six node tables into one `nodes` table, keyed by the UUID with a `node_type` column, would make `(node_type, node_id)` on links and metadata an ordinary foreign key to `nodes.id`. The parent-type rule would then be a library check, or a trigger, rather than a foreign key. ADR 0001 lists this as a follow-up. It is not needed for the move to SQLite.
+5. **Catalog backup.** A copy of the catalog file taken while a writer is active may miss committed rows that are still in the `-wal` file. Copying while no `bpm` process has the catalog open is safe. A `bpm backup` command using SQLite's online backup API or `VACUUM INTO` would remove that caveat. It is not in Core yet.
+6. **Object-store download flag.** Ingest and scan trust a published checksum and download the body only when asked. The spelling of that flag is deferred until the object-store stage starts.

@@ -58,9 +58,9 @@ Filesystem locations are the first implementation milestone. Remote object store
 
 ### 4.1 Catalogs
 
-A catalog is one DuckDB file.
+A catalog is one database file.
 
-`bpm init PATH` creates a catalog at `PATH`. `bpm init` with no path creates `~/.bpm/default.duckdb`. Creating a catalog that already exists fails unless the operator passes `--force`, which replaces the catalog file. The catalog file is created so that only the current user can read and write it, and `~/.bpm` is created the same way.
+`bpm init PATH` creates a catalog at `PATH`. `bpm init` with no path creates `~/.bpm/default.db`. Creating a catalog that already exists fails unless the operator passes `--force`, which replaces the catalog file. The catalog file is created so that only the current user can read and write it, and `~/.bpm` is created the same way.
 
 Each catalog has its own id, assigned at init. Copying the file copies the id. Two catalogs never share rows.
 
@@ -68,7 +68,7 @@ Resolution order for every command that uses a catalog:
 
 1. `--catalog PATH`
 2. The `BPM_CATALOG` environment variable
-3. `~/.bpm/default.duckdb`
+3. `~/.bpm/default.db`
 
 `bpm catalog` prints the catalog that this order resolves to. A missing default catalog produces an error that tells the operator to run `bpm init`.
 
@@ -361,7 +361,7 @@ The token typed into `bpm serve` is not `bpm login`. `bpm login` is the future c
 A data manager keeps the CLL grant in its own catalog.
 
 ```
-bpm init ~/work/cll/bpm.duckdb
+bpm init ~/work/cll/bpm.db
 bpm create program --name CLL
 bpm create project --parent /CLL --name WES-relapse
 bpm create case --parent /CLL/WES-relapse
@@ -392,8 +392,8 @@ A manifest of `/CLL/WES-relapse` is the §4.10 sketch, which is not finalized. I
 
 Scenarios below describe Core behavior. A scenario marked deferred or unstable becomes a test when that milestone is built. It is not part of the settled Core contract. Where a scenario names a `bpm query` flag, the behavior is the §4.4 selectors and the spelling is the §4.8 sketch.
 
-1. **Init.** `bpm init PATH` creates a catalog readable and writable only by the current user. A second init without `--force` fails and leaves the file untouched. `bpm init` with no arguments creates `~/.bpm/default.duckdb`.
-2. **Resolution.** With no flag and no `BPM_CATALOG` environment variable, a command uses `~/.bpm/default.duckdb`. `BPM_CATALOG` overrides the default. `--catalog` overrides both. A `bpm.duckdb` sitting in the current directory is not selected on its own.
+1. **Init.** `bpm init PATH` creates a catalog readable and writable only by the current user. A second init without `--force` fails and leaves the file untouched. `bpm init` with no arguments creates `~/.bpm/default.db`.
+2. **Resolution.** With no flag and no `BPM_CATALOG` environment variable, a command uses `~/.bpm/default.db`. `BPM_CATALOG` overrides the default. `--catalog` overrides both. A `bpm.db` sitting in the current directory is not selected on its own.
 3. **Chain.** An operator can create Program → Project → Case → Sample → Raw Data → Analysis. Program and Project are addressed by path. The other four are addressed by the UUID returned at creation, and by a metadata path that matches exactly one entity, such as `/CLL/WES-relapse/ext_id:CLL-001`.
 4. **Illegal parent.** Creating a Sample under a Program fails. Creating a second parent for a Case fails. The catalog is unchanged by the failed command.
 5. **Names.** Two Projects under one Program cannot share a name. The same Project name under two Programs is allowed. A Program or Project name that contains `/`, `:`, or surrounding whitespace is rejected. Case, Sample, Raw Data, and Analysis accept no name.
@@ -562,7 +562,7 @@ These were settled before the draft, or chosen while writing it so the acceptanc
 | Topic | Decision |
 | --- | --- |
 | Documents | This PRD plus an architecture overview. Govern stays in this PRD at behavior depth. |
-| Catalog scope | One DuckDB file per initiative. Several catalogs per person. Default `~/.bpm/default.duckdb`. Resolution is `--catalog`, then the `BPM_CATALOG` environment variable, then that default. |
+| Catalog scope | One database file per initiative. Several catalogs per person. Default `~/.bpm/default.db`. Resolution is `--catalog`, then the `BPM_CATALOG` environment variable, then that default. |
 | Tree | Six types, parent fixed as the type above. Derived-from edges between files carry pools, multiplexed relationships, and joint analyses. |
 | Entity names | `name` is required on Program and Project only, and forms their path. Case, Sample, Raw Data, and Analysis have no name and are addressed by UUID. Study identifiers are ordinary metadata. |
 | Sample granularity | Analyte, portion, slide, and aliquot are metadata. Sibling Samples plus `source_sample` cover a specimen and its slide when both must be nodes. |
@@ -575,7 +575,7 @@ These were settled before the draft, or chosen while writing it so the acceptanc
 | Manifest hash | `content_id` ignores locations. `snapshot_id` includes them. |
 | Materialize | Core can stage a manifest. Default is a copy. Source bytes are never deleted by BPM. |
 | SQL | Local, read-only unless `--write`. Absent from the first remote release. |
-| Server database | DuckDB for catalogs and for the first server. Postgres is an exit described in the architecture overview. |
+| Server database | Embedded, one file per catalog, for Core and for the first server. The engine is an architecture decision. Postgres is an exit described in the architecture overview. |
 | Web in Core | v1 is a read-only UI on `127.0.0.1:3000`, after the operations it displays. `--host` / `BPM_HOST` requires `--token` / `BPM_TOKEN`. Read-write UI is v2 and is TBD. |
 | Prior CLI sketch | The earlier `bpm_next` command list informed this vocabulary. It is not the specification. |
 

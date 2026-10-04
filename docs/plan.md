@@ -8,7 +8,7 @@ This is the build order for the `bpm` binary. Behavior is the PRD. Mechanism is 
 
 PRD §4.16 is what the Core release contains. The order below is the order to build it. That section lists import and manifests before the web UI. They wait here, because §4.9 and §4.10 are still unstable. The read-only UI does not need them.
 
-One Cargo package. The modules are the ones in the architecture overview: `model`, `catalog`, `ingest`, `query`, `cli`, and `web`. The catalog trait is the seam. SQL stays inside the DuckDB implementation.
+One Cargo package. The modules are the ones in the architecture overview: `model`, `catalog`, `ingest`, `query`, `cli`, and `web`. The catalog trait is the seam. SQL stays inside the SQLite implementation.
 
 ## What "done" means
 
@@ -18,7 +18,7 @@ A stage is done when the §4.15 scenarios named for it pass against a temporary 
 
 PRD slice A. Scenarios 1–9, 25, 27, and 30.
 
-- `bpm init`, catalog resolution, file modes, the advisory lock, and the schema migrator in [Catalog migrations](architecture/migrations.md).
+- `bpm init`, catalog resolution, file modes, WAL mode and the `BEGIN IMMEDIATE` write lock, and the schema migrator in [Catalog migrations](architecture/migrations.md).
 - The six node tables, metadata, rename, reparent, and delete. UUIDv7 comes from the library.
 - `bpm sql`, read-only unless `--write`. No command history.
 - Enough of `bpm query` to answer the selectors in §4.4 for the scenarios above. The flag spelling is the §4.8 sketch and may change. Impact and lineage are not in this stage.
