@@ -1,0 +1,150 @@
+{
+ "engine": "duckdb",
+ "K": 50,
+ "fk": true,
+ "load": {
+  "tables": 138.58,
+  "secondary_indexes": 18.16
+ },
+ "size_gb": 4.82,
+ "open_plus_first_query_s": 0.011,
+ "queries": {
+  "ent key:value (rare ~1k)": {
+   "rows": 100,
+   "first_ms": 4.9,
+   "best_ms": 1.4
+  },
+  "ent key: (present, 100k)": {
+   "rows": 100000,
+   "first_ms": 17.0,
+   "best_ms": 16.6
+  },
+  "ent :value (any key)": {
+   "rows": 2000,
+   "first_ms": 9.6,
+   "best_ms": 4.2
+  },
+  "file key:value rare (~1)": {
+   "rows": 1,
+   "first_ms": 47.4,
+   "best_ms": 15.3
+  },
+  "file key:value (~100)": {
+   "rows": 100,
+   "first_ms": 20.7,
+   "best_ms": 18.1
+  },
+  "file key:value (~10k)": {
+   "rows": 10000,
+   "first_ms": 55.0,
+   "best_ms": 51.9
+  },
+  "file key:value (~200k)": {
+   "rows": 200000,
+   "first_ms": 169.9,
+   "best_ms": 156.6
+  },
+  "file 2-selector conj": {
+   "rows": 0,
+   "first_ms": 78.4,
+   "best_ms": 73.4
+  },
+  "file key: present (count)": {
+   "rows": 1,
+   "first_ms": 8.3,
+   "best_ms": 7.6
+  },
+  "file :value any key (count)": {
+   "rows": 1,
+   "first_ms": 80.7,
+   "best_ms": 80.5
+  },
+  "files --under project (~50k rows)": {
+   "rows": 50001,
+   "first_ms": 77.3,
+   "best_ms": 77.3
+  },
+  "files --under project + selector": {
+   "rows": 400,
+   "first_ms": 64.9,
+   "best_ms": 57.0
+  },
+  "entities --under project": {
+   "rows": 5000,
+   "first_ms": 11.5,
+   "best_ms": 11.1
+  },
+  "uuid lookup": {
+   "rows": 1,
+   "first_ms": 1.5,
+   "best_ms": 0.2
+  },
+  "file detail (1 file, 5 tables)": {
+   "rows": 1,
+   "first_ms": 11.2,
+   "best_ms": 4.1
+  },
+  "summary: files by node_type": {
+   "rows": 2,
+   "first_ms": 42.0,
+   "best_ms": 41.1
+  },
+  "summary: files by assay": {
+   "rows": 8,
+   "first_ms": 34.4,
+   "best_ms": 32.1
+  },
+  "summary: drift counts": {
+   "rows": 6,
+   "first_ms": 4.3,
+   "best_ms": 3.4
+  },
+  "summary: files by format-key": {
+   "rows": 20,
+   "first_ms": 12.4,
+   "best_ms": 12.0
+  },
+  "unlinked files (anti-join)": {
+   "rows": 1,
+   "first_ms": 25.1,
+   "best_ms": 23.2
+  },
+  "possible dups (size+fp)": {
+   "rows": 1,
+   "first_ms": 17.7,
+   "best_ms": 16.6
+  }
+ },
+ "writes": {
+  "ingest batch 1000 files (files+locations)": {
+   "n": 50,
+   "ms_each": 5.17
+  },
+  "scan batch 1000 (update files+locs, insert digests)": {
+   "n": 50,
+   "ms_each": 16.07
+  },
+  "meta set (1 row/txn upsert)": {
+   "n": 300,
+   "ms_each": 9.05
+  },
+  "file meta set (1 row/txn upsert)": {
+   "n": 300,
+   "ms_each": 187.14
+  },
+  "link (1 row/txn)": {
+   "n": 300,
+   "ms_each": 0.83
+  },
+  "rename node": {
+   "n": 100,
+   "ms_each": 0.28
+  },
+  "reparent case": {
+   "n": 100,
+   "ms_each": 0.33
+  }
+ },
+ "cascade_delete_project_s": 3.074,
+ "size_gb_after_writes": 5.43
+}

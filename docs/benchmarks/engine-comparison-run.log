@@ -1,0 +1,137 @@
+=== duckdb 50 ===
+  load tables: 138.6s
+  load secondary_indexes: 18.2s
+  size 4.82 GB
+  ent key:value (rare ~1k)                 rows=100     first=      4.9ms best=      1.4ms
+  ent key: (present, 100k)                 rows=100000  first=     17.0ms best=     16.6ms
+  ent :value (any key)                     rows=2000    first=      9.6ms best=      4.2ms
+  file key:value rare (~1)                 rows=1       first=     47.4ms best=     15.3ms
+  file key:value (~100)                    rows=100     first=     20.7ms best=     18.1ms
+  file key:value (~10k)                    rows=10000   first=     55.0ms best=     51.9ms
+  file key:value (~200k)                   rows=200000  first=    169.9ms best=    156.6ms
+  file 2-selector conj                     rows=0       first=     78.4ms best=     73.4ms
+  file key: present (count)                rows=1       first=      8.3ms best=      7.6ms
+  file :value any key (count)              rows=1       first=     80.7ms best=     80.5ms
+  files --under project (~50k rows)        rows=50001   first=     77.3ms best=     77.3ms
+  files --under project + selector         rows=400     first=     64.9ms best=     57.0ms
+  entities --under project                 rows=5000    first=     11.5ms best=     11.1ms
+  uuid lookup                              rows=1       first=      1.5ms best=      0.2ms
+  file detail (1 file, 5 tables)           rows=1       first=     11.2ms best=      4.1ms
+  summary: files by node_type              rows=2       first=     42.0ms best=     41.1ms
+  summary: files by assay                  rows=8       first=     34.4ms best=     32.1ms
+  summary: drift counts                    rows=6       first=      4.3ms best=      3.4ms
+  summary: files by format-key             rows=20      first=     12.4ms best=     12.0ms
+  unlinked files (anti-join)               rows=1       first=     25.1ms best=     23.2ms
+  possible dups (size+fp)                  rows=1       first=     17.7ms best=     16.6ms
+  write ingest batch 1000 files (files+locations)      5.17 ms each (n=50)
+  write scan batch 1000 (update files+locs, insert digests)     16.07 ms each (n=50)
+  write meta set (1 row/txn upsert)               9.05 ms each (n=300)
+  write file meta set (1 row/txn upsert)        187.14 ms each (n=300)
+  write link (1 row/txn)                          0.83 ms each (n=300)
+  write rename node                               0.28 ms each (n=100)
+  write reparent case                             0.33 ms each (n=100)
+  cascade delete project 3.074s
+done 5.43 GB
+=== sqlite 50 ===
+  load tables: 54.4s
+  load secondary_indexes: 84.4s
+  size 7.53 GB
+  ent key:value (rare ~1k)                 rows=100     first=      0.1ms best=      0.0ms
+  ent key: (present, 100k)                 rows=100000  first=     28.0ms best=     25.1ms
+  ent :value (any key)                     rows=2000    first=      2.9ms best=      1.2ms
+  file key:value rare (~1)                 rows=1       first=      1.2ms best=      0.0ms
+  file key:value (~100)                    rows=100     first=      0.5ms best=      0.0ms
+  file key:value (~10k)                    rows=10000   first=      3.2ms best=      2.4ms
+  file key:value (~200k)                   rows=200000  first=     54.6ms best=     52.0ms
+  file 2-selector conj                     rows=0       first=      5.3ms best=      0.1ms
+  file key: present (count)                rows=1       first=     41.7ms best=     23.7ms
+  file :value any key (count)              rows=1       first=      4.7ms best=      0.2ms
+  files --under project (~50k rows)        rows=50001   first=   1820.6ms best=    208.7ms
+  files --under project + selector         rows=400     first=    491.6ms best=    130.5ms
+  entities --under project                 rows=5000    first=      3.8ms best=      3.6ms
+  uuid lookup                              rows=1       first=      0.2ms best=      0.0ms
+  file detail (1 file, 5 tables)           rows=1       first=      0.8ms best=      0.0ms
+  summary: files by node_type              rows=2       first=    892.2ms best=    790.9ms
+  summary: files by assay                  rows=8       first=    572.0ms best=    539.9ms
+  summary: drift counts                    rows=6       first=   1799.8ms best=    663.8ms
+  summary: files by format-key             rows=20      first=     89.9ms best=     54.6ms
+  unlinked files (anti-join)               rows=1       first=    372.0ms best=    299.7ms
+  possible dups (size+fp)                  rows=1       first=    423.7ms best=    422.3ms
+  write ingest batch 1000 files (files+locations)      3.60 ms each (n=50)
+  write scan batch 1000 (update files+locs, insert digests)     41.57 ms each (n=50)
+  write meta set (1 row/txn upsert)               0.11 ms each (n=300)
+  write file meta set (1 row/txn upsert)          0.41 ms each (n=300)
+  write link (1 row/txn)                          0.08 ms each (n=300)
+  write rename node                               0.02 ms each (n=100)
+  write reparent case                             0.07 ms each (n=100)
+  cascade delete project 1.308s
+done 7.56 GB
+=== duckdb 100 ===
+  load tables: 259.2s
+  load secondary_indexes: 37.6s
+  size 8.81 GB
+  ent key:value (rare ~1k)                 rows=100     first=      5.2ms best=      1.1ms
+  ent key: (present, 100k)                 rows=100000  first=     19.4ms best=     19.1ms
+  ent :value (any key)                     rows=2000    first=     12.1ms best=      2.9ms
+  file key:value rare (~1)                 rows=1       first=     56.2ms best=     14.3ms
+  file key:value (~100)                    rows=100     first=     23.9ms best=     20.2ms
+  file key:value (~10k)                    rows=10000   first=     64.9ms best=     62.7ms
+  file key:value (~200k)                   rows=200000  first=     78.8ms best=     78.8ms
+  file 2-selector conj                     rows=0       first=     91.0ms best=     84.2ms
+  file key: present (count)                rows=1       first=     10.8ms best=      8.9ms
+  file :value any key (count)              rows=1       first=    172.7ms best=    161.0ms
+  files --under project (~50k rows)        rows=50001   first=     73.9ms best=     73.9ms
+  files --under project + selector         rows=400     first=     68.4ms best=     56.8ms
+  entities --under project                 rows=5000    first=     11.3ms best=     11.3ms
+  uuid lookup                              rows=1       first=      1.8ms best=      0.2ms
+  file detail (1 file, 5 tables)           rows=1       first=     11.5ms best=      3.6ms
+  summary: files by node_type              rows=2       first=     47.7ms best=     41.7ms
+  summary: files by assay                  rows=8       first=     37.0ms best=     32.3ms
+  summary: drift counts                    rows=6       first=      5.6ms best=      3.2ms
+  summary: files by format-key             rows=20      first=     16.0ms best=     15.8ms
+  unlinked files (anti-join)               rows=1       first=     26.0ms best=     24.2ms
+  possible dups (size+fp)                  rows=1       first=     19.5ms best=     16.4ms
+  write ingest batch 1000 files (files+locations)      5.25 ms each (n=50)
+  write scan batch 1000 (update files+locs, insert digests)     16.13 ms each (n=50)
+  write meta set (1 row/txn upsert)               8.67 ms each (n=300)
+  write file meta set (1 row/txn upsert)        275.28 ms each (n=300)
+  write link (1 row/txn)                          0.44 ms each (n=300)
+  write rename node                               0.29 ms each (n=100)
+  write reparent case                             0.30 ms each (n=100)
+  cascade delete project 3.041s
+done 9.48 GB
+=== sqlite 100 ===
+  load tables: 104.0s
+  load secondary_indexes: 172.5s
+  size 14.07 GB
+  ent key:value (rare ~1k)                 rows=100     first=      0.1ms best=      0.0ms
+  ent key: (present, 100k)                 rows=100000  first=     31.1ms best=     25.0ms
+  ent :value (any key)                     rows=2000    first=      2.8ms best=      1.2ms
+  file key:value rare (~1)                 rows=1       first=      0.7ms best=      0.0ms
+  file key:value (~100)                    rows=100     first=      0.4ms best=      0.0ms
+  file key:value (~10k)                    rows=10000   first=      3.1ms best=      2.4ms
+  file key:value (~200k)                   rows=200000  first=     52.1ms best=     51.7ms
+  file 2-selector conj                     rows=0       first=      4.6ms best=      0.1ms
+  file key: present (count)                rows=1       first=     41.7ms best=     23.8ms
+  file :value any key (count)              rows=1       first=     60.5ms best=      0.5ms
+  files --under project (~50k rows)        rows=50001   first=   2030.3ms best=    205.7ms
+  files --under project + selector         rows=400     first=   2531.0ms best=    144.1ms
+  entities --under project                 rows=5000    first=      4.1ms best=      3.7ms
+  uuid lookup                              rows=1       first=      0.2ms best=      0.0ms
+  file detail (1 file, 5 tables)           rows=1       first=      0.6ms best=      0.0ms
+  summary: files by node_type              rows=2       first=    888.0ms best=    771.1ms
+  summary: files by assay                  rows=8       first=    517.3ms best=    517.3ms
+  summary: drift counts                    rows=6       first=   1898.1ms best=    664.8ms
+  summary: files by format-key             rows=20      first=     80.2ms best=     56.3ms
+  unlinked files (anti-join)               rows=1       first=    315.0ms best=    312.1ms
+  possible dups (size+fp)                  rows=1       first=    442.2ms best=    436.8ms
+  write ingest batch 1000 files (files+locations)      3.97 ms each (n=50)
+  write scan batch 1000 (update files+locs, insert digests)     50.91 ms each (n=50)
+  write meta set (1 row/txn upsert)               0.13 ms each (n=300)
+  write file meta set (1 row/txn upsert)          0.78 ms each (n=300)
+  write link (1 row/txn)                          0.08 ms each (n=300)
+  write rename node                               0.02 ms each (n=100)
+  write reparent case                             0.04 ms each (n=100)
+  cascade delete project 1.344s
+done 14.09 GB
+ALLDONE
