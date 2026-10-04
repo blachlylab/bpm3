@@ -72,8 +72,31 @@ pub enum Error {
     )]
     RepairNeeded(usize),
 
-    #[error("file queries are not part of this milestone; they arrive with the file indexer")]
-    FileMilestone,
+    #[error("no file matches {0}")]
+    FileNotFound(String),
+
+    #[error("no location {0}")]
+    LocationNotFound(String),
+
+    #[error("file is not linked to {0}")]
+    NotLinked(String),
+
+    #[error("file has links; unlink them first, or pass --cascade")]
+    FileLinked,
+
+    #[error("acknowledge takes one file; {0} is a directory")]
+    AcknowledgeDirectory(PathBuf),
+
+    #[error("file {0} has no present location to read")]
+    NoPresentLocation(String),
+
+    #[error(
+        "the present locations of file {id} do not hold the same bytes; restore or remove the wrong location, then acknowledge again:\n{listing}"
+    )]
+    LocationsDisagree { id: String, listing: String },
+
+    #[error("{0} path(s) could not be read; they are listed above")]
+    PathErrors(usize),
 
     #[error("{0} is not part of this milestone")]
     NotThisMilestone(&'static str),

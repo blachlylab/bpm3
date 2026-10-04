@@ -1,4 +1,5 @@
-//! SQLite catalog: init, the entity tree, metadata, and read-only SQL.
+//! SQLite catalog: init, the entity tree, metadata, file rows, run logs, and
+//! read-only SQL.
 //!
 //! Callers outside this module do not see SQL. The catalog runs in WAL mode, so
 //! a [`Catalog`] opened for reading sees the last committed state while another
@@ -23,6 +24,15 @@ use crate::model::{
     Address, EntityRow, NodeType, Selector, parse_address, validate_meta_token, validate_name,
 };
 use crate::perms;
+
+mod files;
+mod runs;
+
+pub use files::{
+    AckObservation, AckOutcome, Candidate, FileQuery, IngestApplied, IngestEntry, ScanOutcome,
+    ScanScope, ScanTarget, Seen,
+};
+pub use runs::{Run, RunKind, lock_path};
 
 /// Filters for `bpm query entities`. An absent `under` means the whole catalog.
 pub struct EntityQuery {
@@ -97,11 +107,13 @@ impl Catalog {
         }
         let mut conn = writable(path)?;
         migrate::apply(&mut conn).map_err(|err| busy(err, path))?;
-        Ok(Self {
+        let mut catalog = Self {
             conn,
             writable: true,
             path: path.to_path_buf(),
-        })
+        };
+        catalog.recover_runs()?;
+        Ok(catalog)
     }
 
     /// Create a catalog at `path`. A file that is already there is left untouched

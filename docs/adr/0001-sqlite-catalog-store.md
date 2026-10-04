@@ -144,7 +144,7 @@ Costs:
 
 Implementation, completed with this ADR:
 
-- `Cargo.toml` depends on `rusqlite` (`bundled`, pinned) in place of `duckdb`. `fs4` is dropped with the advisory lock, which was its only use. The per-run liveness flock in stage 2 will bring a file-lock dependency back.
+- `Cargo.toml` depends on `rusqlite` (`bundled`, pinned) in place of `duckdb`. `fs4` is dropped with the advisory lock, which was its only use. The per-run liveness flock in stage 2 uses `std::fs::File::try_lock` (stable since Rust 1.89), so no file-lock crate came back.
 - `migrations/V001__init.sql` is rewritten for SQLite: `STRICT` tables, `WITHOUT ROWID` where the key is text or composite, and `REFERENCES ... ON DELETE RESTRICT` restored. No catalog had shipped, so V001 was rewritten rather than followed by a V002.
 - `src/catalog.rs` and `src/migrate.rs` use `BEGIN IMMEDIATE` for every write, `busy_timeout` for the busy error, a `SQLITE_OPEN_READ_ONLY` connection for reads, and ISO 8601 `Z` timestamps.
 - `bpm init` sets `PRAGMA application_id`. A SQLite file without BPM's id is refused and never migrated.
@@ -165,5 +165,5 @@ Implementation, completed with this ADR:
 
 - **One node table.** Merging the six node tables would make `(node_type, node_id)` on links and metadata a real foreign key. Overview §14, open question 4.
 - **Durability setting.** `synchronous=FULL` is the starting choice. `NORMAL` in WAL mode never corrupts the file, but it can lose the last commits on power loss. Measure the cost on Linux before relaxing it.
-- **`ANALYZE` cadence.** Run `PRAGMA optimize` after large ingests and scans, and confirm the planner keeps choosing the `(key, value)` indexes as metadata grows.
+- **`ANALYZE` cadence.** Run `PRAGMA optimize` after large ingests and scans, and confirm the planner keeps choosing the `(key, value)` indexes as metadata grows. Stage 2 runs it at the end of every ingest and scan. Confirming the plans at scale is part of the scenario 31 benchmark.
 - **Backup.** `bpm backup` through the SQLite backup API or `VACUUM INTO`. Overview §14, open question 5.

@@ -181,7 +181,7 @@ fn scenario_01_init_modes_and_force() {
         &default,
         "SELECT value FROM catalog_meta WHERE key = 'schema_version'",
     ));
-    assert_eq!(version, "1");
+    assert_eq!(version, "2");
 
     ok(bpm(home, home, &["init", "--force"]));
     let id_after = line(&sql(
@@ -1382,7 +1382,7 @@ fn schema_newer_is_refused_and_a_missing_version_is_corrupt() {
     std::thread::sleep(Duration::from_millis(20));
     let refused = fail(bpm(home, home, &["--catalog", cat, "query", "entities"]));
     assert!(
-        refused.err.contains("99") && refused.err.contains('1'),
+        refused.err.contains("99") && refused.err.contains("(version 2)"),
         "{}",
         refused.err
     );
@@ -1579,12 +1579,12 @@ fn later_milestones_are_not_stubbed_as_success() {
     let catalog = home.join("cat.db");
     init(home, &catalog);
     let cat = catalog.to_str().unwrap();
-    let files = fail(bpm(
-        home,
-        home,
-        &["--catalog", cat, "query", "files", "--unlinked"],
-    ));
-    assert!(files.err.contains("file indexer"), "{}", files.err);
+    let summary = fail(bpm(home, home, &["--catalog", cat, "query", "summary"]));
+    assert!(
+        summary.err.contains("not part of this milestone"),
+        "{}",
+        summary.err
+    );
     let impact = fail(bpm(
         home,
         home,

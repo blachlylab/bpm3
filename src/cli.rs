@@ -1,14 +1,16 @@
-//! Command line for the catalog notebook. Flag spelling for `bpm query` follows
-//! the PRD §4.8 sketch and may change.
+//! Command line for the catalog notebook and the file indexer. Flag spelling
+//! for `bpm query` follows the PRD §4.8 sketch and may change.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::catalog::{self, Catalog, EntityQuery, SqlOutcome};
+use crate::catalog::{self, AckOutcome, Catalog, EntityQuery, FileQuery, SqlOutcome};
 use crate::error::Error;
-use crate::model::NodeType;
+use crate::ingest::filter::{self, FilterSpec, PathFilter};
+use crate::ingest::{self, AckReport, ScanArg};
+use crate::model::{Drift, NodeType, POSIX};
 use crate::perms;
 use crate::query::{self, RenderFormat};
 
@@ -54,12 +56,65 @@ enum Command {
     Rename { target: String, new_name: String },
     /// Move an entity under a new legal parent.
     Reparent { target: String, new_parent: String },
-    /// Delete an entity. Refuses when children or linked files remain.
+    /// Delete an entity, a location, or a file row. Never deletes bytes.
+    /// Refuses an entity with children or linked files, and a linked file.
     Delete {
-        target: String,
-        /// Delete descendant entities, their metadata, and their file links.
+        /// Entity path or UUID.
+        #[arg(required_unless_present_any = ["location", "file"], conflicts_with_all = ["location", "file"])]
+        target: Option<String>,
+        /// Remove this location from its file. The file and its other locations stay.
+        #[arg(long, conflicts_with = "file")]
+        location: Option<String>,
+        /// Remove this file row (id or location path) with its locations and digests.
+        #[arg(long)]
+        file: Option<String>,
+        /// Also delete descendant entities, their metadata, and their file links;
+        /// or, with --file, that file's links.
         #[arg(long)]
         cascade: bool,
+    },
+    /// Add the files under a directory that are not already in the catalog.
+    Ingest {
+        path: PathBuf,
+        #[command(flatten)]
+        filters: FilterArgs,
+    },
+    /// Check locations already in the catalog for drift and store digests.
+    /// No argument scans every location; a backend or a path narrows that.
+    Scan {
+        /// A backend (posix, s3) or a path. Write ./posix for a directory named posix.
+        target: Option<String>,
+        /// Also compute and store MD5.
+        #[arg(long)]
+        md5: bool,
+        #[command(flatten)]
+        filters: FilterArgs,
+    },
+    /// Accept the bytes now at one file's locations as its next generation.
+    /// Takes exactly one file; never a directory or a set of files.
+    Acknowledge {
+        /// File id, or the path of one of its locations.
+        file: String,
+        /// Also compute and store MD5 for the accepted bytes.
+        #[arg(long)]
+        md5: bool,
+    },
+    /// Attach a file to an entity with a role. Linking the same pair again replaces the role.
+    Link {
+        /// File id, or the path of one of its locations.
+        file: String,
+        /// Entity path or UUID.
+        entity: String,
+        /// An open string, such as data or index.
+        #[arg(long)]
+        role: String,
+    },
+    /// Detach a file from an entity. The file row stays.
+    Unlink {
+        /// File id, or the path of one of its locations.
+        file: String,
+        /// Entity path or UUID.
+        entity: String,
     },
     /// Set, read, or remove metadata.
     Meta {
@@ -97,6 +152,44 @@ enum Command {
     },
 }
 
+#[derive(clap::Args)]
+struct FilterArgs {
+    /// Comma-separated globs that replace the denylist in ~/.bpm/config.toml for this run.
+    #[arg(long, value_name = "PATTERNS")]
+    denylist: Vec<String>,
+    /// Do not skip the built-in names (.DS_Store, Thumbs.db).
+    #[arg(long)]
+    no_default_denylist: bool,
+    /// Comma-separated globs. When set, only matching paths are considered.
+    #[arg(long, value_name = "PATTERNS")]
+    whitelist: Vec<String>,
+}
+
+impl FilterArgs {
+    fn build(&self) -> Result<PathFilter, Error> {
+        let spec = FilterSpec {
+            denylist: (!self.denylist.is_empty()).then(|| {
+                self.denylist
+                    .iter()
+                    .flat_map(|raw| filter::split_patterns(raw))
+                    .collect()
+            }),
+            no_default_denylist: self.no_default_denylist,
+            whitelist: self
+                .whitelist
+                .iter()
+                .flat_map(|raw| filter::split_patterns(raw))
+                .collect(),
+        };
+        // With no HOME there is no config file, which is an empty global list.
+        let global = match (&spec.denylist, catalog::home_dir()) {
+            (None, Ok(home)) => filter::global_denylist(&home)?,
+            _ => Vec::new(),
+        };
+        PathFilter::new(&spec, global)
+    }
+}
+
 #[derive(Subcommand)]
 enum MetaCmd {
     Set {
@@ -131,8 +224,24 @@ enum QueryCmd {
         format: OutFmt,
     },
     Files {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        _args: Vec<String>,
+        /// Program path, project path, UUID, or metadata path. Files linked to
+        /// that entity or any descendant.
+        #[arg(long)]
+        under: Option<String>,
+        /// Only links with this role.
+        #[arg(long)]
+        role: Option<String>,
+        /// Files with no link.
+        #[arg(long)]
+        unlinked: bool,
+        /// Files with a location in this state. Repeatable.
+        #[arg(long, value_enum)]
+        drift: Vec<DriftArg>,
+        /// algorithm:hex, such as blake3:<hex>. Matches a current digest.
+        #[arg(long)]
+        digest: Option<String>,
+        #[arg(long, value_enum, default_value = "table")]
+        format: OutFmt,
     },
     Impact {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -165,6 +274,28 @@ impl From<Kind> for NodeType {
             Kind::Sample => Self::Sample,
             Kind::RawData => Self::RawData,
             Kind::Analysis => Self::Analysis,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum DriftArg {
+    Missing,
+    StatChanged,
+    DigestMismatch,
+    Ok,
+    Unverified,
+}
+
+impl From<DriftArg> for Drift {
+    fn from(arg: DriftArg) -> Self {
+        match arg {
+            DriftArg::Missing => Self::Missing,
+            DriftArg::StatChanged => Self::StatChanged,
+            DriftArg::DigestMismatch => Self::DigestMismatch,
+            DriftArg::Ok => Self::Ok,
+            DriftArg::Unverified => Self::Unverified,
         }
     }
 }
@@ -233,9 +364,128 @@ fn dispatch() -> Result<(), Error> {
             let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
             catalog.reparent(&target, &new_parent)?;
         }
-        Command::Delete { target, cascade } => {
+        Command::Delete {
+            target,
+            location,
+            file,
+            cascade,
+        } => {
             let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
-            catalog.delete(&target, cascade)?;
+            if let Some(location) = location {
+                catalog.delete_location(POSIX, &ingest::location_uri(&location)?)?;
+            } else if let Some(file) = file {
+                catalog.delete_file(&ingest::file_ref(&file)?, cascade)?;
+            } else if let Some(target) = target {
+                catalog.delete(&target, cascade)?;
+            }
+        }
+        Command::Ingest { path, filters } => {
+            let filter = filters.build()?;
+            let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
+            let report = ingest::ingest(&mut catalog, &path, &filter)?;
+            for (uri, message) in &report.errors {
+                eprintln!("bpm: {uri}: {message}");
+            }
+            for (uri, of) in &report.possible_duplicates {
+                println!(
+                    "possible duplicate: {uri} has the size and fingerprint of {}, which could not be hashed; not merged",
+                    of.join(", ")
+                );
+            }
+            println!(
+                "ingest {}: {} files seen, {} new files, {} new locations, {} errors",
+                report.run_id.map(|id| id.to_string()).unwrap_or_default(),
+                report.seen,
+                report.created,
+                report.located,
+                report.errors.len()
+            );
+            if !report.errors.is_empty() {
+                return Err(Error::PathErrors(report.errors.len()));
+            }
+        }
+        Command::Scan {
+            target,
+            md5,
+            filters,
+        } => {
+            let filter = filters.build()?;
+            let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
+            let report = ingest::scan(
+                &mut catalog,
+                &ScanArg::parse(target.as_deref()),
+                &filter,
+                md5,
+            )?;
+            for (uri, message) in &report.errors {
+                eprintln!("bpm: {uri}: {message}");
+            }
+            for (state, uri) in &report.drifted {
+                println!("{}\t{uri}", state.slug());
+            }
+            let counts = [
+                Drift::Ok,
+                Drift::Unverified,
+                Drift::Missing,
+                Drift::StatChanged,
+                Drift::DigestMismatch,
+            ]
+            .iter()
+            .map(|state| {
+                format!(
+                    "{} {}",
+                    report.counts.get(state).copied().unwrap_or(0),
+                    state.slug()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+            println!(
+                "scan {}: {} locations, {counts}, {} errors",
+                report.run_id.map(|id| id.to_string()).unwrap_or_default(),
+                report.seen,
+                report.errors.len()
+            );
+            if !report.errors.is_empty() {
+                return Err(Error::PathErrors(report.errors.len()));
+            }
+        }
+        Command::Acknowledge { file, md5 } => {
+            let file = ingest::file_ref(&file)?;
+            let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
+            match ingest::acknowledge(&mut catalog, &file, md5)? {
+                AckReport::NothingToDo(row) => {
+                    println!("file {}: no drift; nothing to acknowledge", row.id);
+                }
+                AckReport::Done { file, outcome } => {
+                    let digest = file
+                        .digests
+                        .iter()
+                        .find(|digest| digest.algorithm == "blake3")
+                        .map(|digest| digest.wire())
+                        .unwrap_or_default();
+                    match outcome {
+                        AckOutcome::NewGeneration(generation) => println!(
+                            "file {}: generation {generation} is current ({digest})",
+                            file.id
+                        ),
+                        AckOutcome::SameBytes(generation) => println!(
+                            "file {}: bytes match generation {generation} ({digest}); stat accepted",
+                            file.id
+                        ),
+                    }
+                }
+            }
+        }
+        Command::Link { file, entity, role } => {
+            let file = ingest::file_ref(&file)?;
+            let mut catalog = open_write(cli.catalog.as_deref())?;
+            catalog.link(&file, &entity, &role)?;
+        }
+        Command::Unlink { file, entity } => {
+            let file = ingest::file_ref(&file)?;
+            let mut catalog = open_write(cli.catalog.as_deref())?;
+            catalog.unlink(&file, &entity)?;
         }
         Command::Meta { action } => match action {
             MetaCmd::Set { target, key, value } => {
@@ -319,7 +569,25 @@ fn dispatch() -> Result<(), Error> {
                 })?;
                 print!("{}", query::render_entities(&rows, format.into()));
             }
-            QueryCmd::Files { .. } => return Err(Error::FileMilestone),
+            QueryCmd::Files {
+                under,
+                role,
+                unlinked,
+                drift,
+                digest,
+                format,
+            } => {
+                let digest = digest.as_deref().map(parse_digest).transpose()?;
+                let mut catalog = open_read(cli.catalog.as_deref())?;
+                let rows = catalog.query_files(&FileQuery {
+                    under,
+                    role,
+                    unlinked,
+                    drift: drift.into_iter().map(Drift::from).collect(),
+                    digest,
+                })?;
+                print!("{}", query::render_files(&rows, format.into()));
+            }
             QueryCmd::Impact { .. } => return Err(Error::NotThisMilestone("impact")),
             QueryCmd::Lineage { .. } => return Err(Error::NotThisMilestone("lineage")),
             QueryCmd::Summary => return Err(Error::NotThisMilestone("summary")),
@@ -327,6 +595,16 @@ fn dispatch() -> Result<(), Error> {
         Command::Login | Command::Logout | Command::Use { .. } => return Err(Error::NoServer),
     }
     Ok(())
+}
+
+/// `algorithm:hex`. The algorithm and the hex are compared in lowercase.
+fn parse_digest(raw: &str) -> Result<(String, String), Error> {
+    let invalid = || Error::Message(format!("{raw} is not algorithm:hex, such as blake3:<hex>"));
+    let (algorithm, hex) = raw.split_once(':').ok_or_else(invalid)?;
+    if algorithm.is_empty() || hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    Ok((algorithm.to_ascii_lowercase(), hex.to_ascii_lowercase()))
 }
 
 /// Opens for reading and refuses a catalog whose entity tree is broken. Every

@@ -2,6 +2,7 @@
 name = "bpm3"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 license = "Apache-2.0"
 autobins = false
 
@@ -10,12 +11,17 @@ name = "bpm"
 path = "src/main.rs"
 
 [dependencies]
+blake3 = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
+globset = "0.4"
+md-5 = "0.11"
 rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
 serde_json = "1"
 thiserror = "1"
+toml = "1"
 uuid = { version = "1", features = ["v7"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }

@@ -231,6 +231,135 @@ pub struct EntityRow {
     pub metadata: BTreeMap<String, String>,
 }
 
+/// The local filesystem backend. The only one this milestone writes.
+pub const POSIX: &str = "posix";
+
+/// Backend names a `bpm scan` argument can be. `s3` selects nothing until the
+/// object-store milestone writes such locations.
+pub const BACKENDS: [&str; 2] = [POSIX, "s3"];
+
+/// A quick fingerprint and the scheme that produced it. Two fingerprints are
+/// compared only when the schemes are equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fingerprint {
+    pub scheme: String,
+    pub hex: String,
+}
+
+/// How a command names one file: its id, or one of its locations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileRef {
+    Id(Uuid),
+    Location { backend: String, uri: String },
+}
+
+/// The operator drift states of one location (PRD §4.6), plus `unverified`
+/// for a present, unchanged location whose bytes have not been hashed yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Drift {
+    Missing,
+    StatChanged,
+    DigestMismatch,
+    Ok,
+    Unverified,
+}
+
+impl Drift {
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::StatChanged => "stat_changed",
+            Self::DigestMismatch => "digest_mismatch",
+            Self::Ok => "ok",
+            Self::Unverified => "unverified",
+        }
+    }
+
+    /// The states one location is in, from its three columns. A location can
+    /// be both `stat_changed` and `digest_mismatch`.
+    pub fn of(presence: &str, stat_state: &str, digest_state: &str) -> Vec<Self> {
+        let present = presence == "present";
+        let mut states = Vec::new();
+        if !present {
+            states.push(Self::Missing);
+        }
+        if present && stat_state == "changed" {
+            states.push(Self::StatChanged);
+        }
+        if digest_state == "mismatch" {
+            states.push(Self::DigestMismatch);
+        }
+        if present && stat_state == "unchanged" && digest_state == "match" {
+            states.push(Self::Ok);
+        }
+        if states.is_empty() {
+            states.push(Self::Unverified);
+        }
+        states
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationRow {
+    pub backend: String,
+    pub uri: String,
+    pub presence: String,
+    pub stat_state: String,
+    pub digest_state: String,
+    pub last_seen_at: String,
+}
+
+impl LocationRow {
+    pub fn drift(&self) -> Vec<Drift> {
+        Drift::of(&self.presence, &self.stat_state, &self.digest_state)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkRow {
+    pub node_type: NodeType,
+    pub node_id: Uuid,
+    pub role: String,
+}
+
+/// One current or historical digest. The wire form is `algorithm:hex`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigestRow {
+    pub algorithm: String,
+    pub hex: String,
+    pub source: String,
+    pub generation: i64,
+    pub current: bool,
+}
+
+impl DigestRow {
+    pub fn wire(&self) -> String {
+        format!("{}:{}", self.algorithm, self.hex)
+    }
+}
+
+/// One file as query returns it. `digests` holds the current digests only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRow {
+    pub id: Uuid,
+    pub size: Option<i64>,
+    pub mtime: Option<String>,
+    pub fingerprint: Option<Fingerprint>,
+    pub digests: Vec<DigestRow>,
+    pub locations: Vec<LocationRow>,
+    pub links: Vec<LinkRow>,
+}
+
+impl FileRow {
+    /// Every state any location is in, each once, in a fixed order.
+    pub fn drift(&self) -> Vec<Drift> {
+        let mut states: Vec<Drift> = self.locations.iter().flat_map(LocationRow::drift).collect();
+        states.sort();
+        states.dedup();
+        states
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

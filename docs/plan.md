@@ -70,12 +70,12 @@ Derived-from edges, impact, lineage, and command history. `bpm sql --write` reco
 
 Not scheduled. PRD §5 is unstable. When that section is revised, `bpmd` is a second binary on the same library. The transport between `bpm` and `bpmd` is still an open choice: HTTP, or gRPC or something similar.
 
-## Before the next migration (V002)
+## Migration runner gaps (closed with V002)
 
-The runner in `src/migrate.rs` is correct for V001, which only creates tables. Two gaps must close before any V002 ships. Both came from the review of the SQLite switch.
+Stage 2 needed V002, an index on `files (size_bytes, fingerprint_scheme, fingerprint)` for the duplicate probe and one on `file_digests (algorithm, digest)`. The two runner gaps found in the review of the SQLite switch were closed first, with unit tests in `src/migrate.rs`:
 
-- **Re-read the version inside the write transaction.** `migrate::apply` reads `schema_version` before it takes `BEGIN IMMEDIATE`. Two writers opening an old catalog at once can then both decide to run the same migration. The second one fails on a raw "already exists" error instead of seeing that the work is done. Fix: re-run `inspect` after `BEGIN IMMEDIATE`, and apply only the migrations still newer than what it finds.
-- **Support the table-rebuild procedure.** [Catalog migrations](architecture/migrations.md) describes SQLite's twelve-step rebuild: `foreign_keys` off before `BEGIN`, `PRAGMA foreign_key_check` before `COMMIT`, `foreign_keys` back on after. The runner always opens the transaction first and never changes `foreign_keys`, and `PRAGMA foreign_keys` has no effect inside a transaction. Fix: let a migration declare that it rebuilds tables, and have the runner run that procedure around it. Add a test that rebuilds a referenced table.
+- **The version is read again inside the write transaction.** A migration another writer has already applied is skipped. It no longer fails on "already exists".
+- **Table rebuilds.** A migration declares `rebuilds: true`, and the runner turns `foreign_keys` off before `BEGIN`, runs `PRAGMA foreign_key_check` before `COMMIT`, and turns it back on afterwards. A test rebuilds a referenced table, and another shows that a rebuild which orphans a row rolls back.
 
 ## Not in these stages
 

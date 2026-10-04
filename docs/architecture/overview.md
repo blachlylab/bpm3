@@ -157,7 +157,8 @@ These rules are how the logical schema is written in SQLite. They stay inside th
 - Every table is `STRICT`, so a value of the wrong type is rejected instead of being stored as written. A table whose primary key is not a single integer is also `WITHOUT ROWID`, so the primary key is the table's own B-tree and not a second index.
 - Every connection `bpm` opens sets `foreign_keys=ON`, `busy_timeout`, and, on a writer, `journal_mode=WAL` and `synchronous=FULL`. Whether a new connection enforces foreign keys depends on how SQLite was built. The bundled engine enforces them by default and `bpm` sets the pragma anyway. A third-party SQLite shell often does not enforce them, and can write rows that break a declared key, the same way it can bypass any library check. The integrity check below is how `bpm` notices.
 - `STRICT` needs SQLite 3.37 or later. An older `sqlite3` shell refuses to open the catalog. The bundled engine is far newer.
-- `ANALYZE` (or `PRAGMA optimize`) runs after an ingest or scan that changed many rows, so the planner has the statistics it needs to choose the `(key, value)` indexes.
+- `PRAGMA optimize` runs at the end of every ingest and scan run, so the planner has the statistics it needs to choose the `(key, value)` indexes. A busy catalog skips it and the run still succeeds.
+- V002 adds two indexes the file indexer needs: `files (size_bytes, fingerprint_scheme, fingerprint)`, which ingest probes for every new path before deciding whether to hash it, and `file_digests (algorithm, digest)` for `bpm query files --digest`.
 
 ### Integrity check and repair
 
@@ -265,7 +266,7 @@ Acknowledge clears `current` on every digest row for that file, then inserts the
 | first_seen_at, last_seen_at | UTC |
 | last_size, last_mtime | Observation at `last_seen_at` |
 | presence | `present` or `missing` |
-| stat_state | `unchanged`, `changed`, `unknown` |
+| stat_state | `unchanged`, `changed`, `unknown`. `changed` stays set until acknowledge |
 | digest_state | `unverified`, `match`, `mismatch` |
 
 Primary key `(backend, uri)`. A path belongs to one file. When a move is confirmed, the old uri is marked `missing` and stays until the operator deletes that location. A second present path with the same digest inserts a second location row for the same `file_id`.
@@ -296,7 +297,7 @@ Cycles are rejected in the library when an edge is recorded, by walking ancestor
 
 ### ingest_runs and scan_runs
 
-Ingest and scan are different commands, so their run logs are different tables with the same columns: id, backend, root_uri (empty when a scan has no path), started_at, finished_at, status (`running`, `complete`, `incomplete`), files_seen, files_created (ingest only). Errors are rows of run id, uri, and message.
+Ingest and scan are different commands, so their run logs are different tables with the same columns: id, backend (empty when a scan covers every backend), root_uri (empty when a scan has no path), started_at, finished_at, status (`running`, `complete`, `incomplete`), files_seen, files_created (ingest only). Errors are rows of run id, uri, and message. A path that cannot be read is an error row. It does not make the run `incomplete`. The command reports it on stderr and exits non-zero after committing everything else.
 
 A run left `running` by a crash is `incomplete` the next time a process opens the catalog and can take that run's liveness flock. The catalog lock is not the signal, because it is released between batches of a live run. Running the command again is the recovery. Individual file batches are already committed. Ingest does not mark missing paths. Scan does.
 
@@ -386,26 +387,30 @@ denylist = ["*.txt", "scratch/**"]
 
 `--denylist '*.txt,*.bak'` replaces that global list for one run. The patterns are comma-separated. A pattern that itself contains a comma is written in the toml, as one string in the array. Passing `--denylist` does not drop the built-in names. `--no-default-denylist` does. There is no per-catalog denylist and no denylist file discovered by walking up from the data.
 
-The whitelist is zero or more glob patterns. With none set, every path that survives the denylist is eligible. With one or more set, a path must match at least one pattern and must not be denied. `*` does not cross `/`. `**` does. On ingest the pattern is matched against the path relative to the walk root. On scan it is matched against the location path relative to the scan root, or against the full URI when the scan covers a whole backend.
+The whitelist is zero or more glob patterns, passed as `--whitelist '*.fq.gz,*.bam'`. Both flags may be repeated, and their comma-separated lists are joined. `--denylist ''` empties the global list for one run. With none set, every path that survives the denylist is eligible. With one or more set, a path must match at least one pattern and must not be denied. `*` does not cross `/`. `**` does. On ingest the pattern is matched against the path relative to the walk root. On scan it is matched against the location path relative to the scan root, or against the full URI when the scan covers a whole backend.
 
 ### Ingest walk
 
 1. Resolve the pathspec to a canonical directory. Refuse to start if it is not a directory.
 2. Walk depth-first. Skip directory symlinks whose canonical target is outside the root, and record them as ingest errors of class `outside_root` (reported, not fatal). Skip symlink cycles.
-3. Follow a symlink to a regular file. The walked path and the canonical path are two location candidates when they differ.
-4. Apply the denylist and the whitelist.
+3. Follow a symlink to a regular file. The walked path and the canonical path are two location candidates when they differ. A directory, whether reached directly or through a link, is walked by its canonical path, so every file under it is recorded under the path later commands resolve to.
+4. Apply the denylist and the whitelist. Each candidate is matched by its own path: relative to the root, or by its final name when a link target is outside the root. A link is skipped when its target is denied, even if the link's own name is allowed.
 5. Skip any path whose `(backend, uri)` is already a location. Do not stat it for drift and do not hash it.
 6. For each new regular file on a posix backend, record size, mtime, and fingerprint. If size, scheme, and fingerprint match an existing file, run the duplicate consultation above. On a checksum-bearing object backend, record size and the backend checksums, and skip the body unless the download flag is set.
-7. A path that cannot be read, when a read was required, is an error and receives no fingerprint.
+7. A path that cannot be read, when a read was required, is an error and receives no fingerprint. It still gets a file row and a location, with the size and mtime stat returned, so a later scan can read it once it is readable. A path that cannot be stat'ed gets no row.
 8. Write the ingest row as `complete`, or `incomplete` if any batch failed.
 
 Ingest does not mark absent paths `missing`. That is scan.
 
-Directory walk parallelism is an implementation choice. Batches of 1,000 files stay the commit boundary. The first implementation may be single-threaded.
+Directory walk parallelism is an implementation choice. Batches of 1,000 files stay the commit boundary. The first implementation is single-threaded and walks each directory in name order.
+
+Within one batch, two new paths with the same size and fingerprint are compared by BLAKE3 the same way, so copies ingested together become one file id. A new file whose BLAKE3 was computed is checked again under the write lock. If another ingest committed those bytes while this batch was hashed, the path becomes a location of that file. If the read that would confirm a fingerprint match fails, ingest reports a possible duplicate and stores the path with no fingerprint, as for any path it could not read. An existing file with no BLAKE3 is hashed only from a present location whose size and mtime still match what the catalog recorded. Bytes that changed since then are not the file the catalog describes, so such a candidate counts as one that cannot be hashed and is reported as a possible duplicate.
 
 ### Scan
 
 Scan does not walk for new files. It selects location rows, applies the denylist and the whitelist, and stats what remains. A posix location is streamed through BLAKE3. A checksum-bearing object location is checked from the checksums the backend returns, and the body is downloaded only when the flag is set.
+
+A scan argument that is a backend name (`posix`, `s3`) selects that backend. Anything else is a path on the local filesystem, so a directory named `posix` is written `./posix`. A path that no longer exists still selects the locations recorded under it. That is how the old side of a move is scanned. Locations are read a page of 1,000 at a time, in `(backend, uri)` order, and each page is one committed batch.
 
 | Invocation | Locations selected |
 | --- | --- |
@@ -415,7 +420,9 @@ Scan does not walk for new files. It selects location rows, applies the denylist
 
 The `s3` row is the selection rule for the later object-store milestone. The first milestone records only `posix` locations, so that invocation selects nothing until the backend exists. A path with no backend is the local filesystem in every milestone.
 
-A missing URI sets `presence` to `missing`. A size or mtime change sets `stat_state` to `changed`. The fingerprint is recomputed only when the bytes are read. The digest comparison is independent, per algorithm, as in the backend-checksum rule above. Operator filters read these columns, so one location can be both `stat_changed` and `digest_mismatch`.
+A missing URI sets `presence` to `missing`. A size or mtime change sets `stat_state` to `changed`, and `last_size` and `last_mtime` record the new observation. `changed` is sticky: a later scan that sees the same new stat does not clear it. Only acknowledge returns the location to `unchanged`, so the evidence of a change outlives the scan that found it. When the stat changed, or the file has no fingerprint yet, the fingerprint is recomputed from the same read. It is written to `files`, with the new size and mtime, only when those bytes hold the current BLAKE3. The size, mtime, and fingerprint on `files` describe the bytes of the current digest, and ingest matches duplicates on them. A copy that drifted must not move them away from its unchanged siblings. Acknowledge is what moves drifted bytes onto `files`. The digest comparison is independent, per algorithm, as in the backend-checksum rule above. Operator filters read these columns, so one location can be both `stat_changed` and `digest_mismatch`.
+
+The first scan that reads a file records its BLAKE3, even when the stat changed since ingest. The location then shows both `stat_changed` and the recorded digest, and any later change to the bytes is `digest_mismatch`. Within one batch, locations whose stat did not change are applied first, so when a file has an unchanged copy, that copy supplies the first digest. An MD5 from `--md5` is recorded only beside a BLAKE3 that matched or was just recorded, in the same generation. A present location whose stat is unchanged but whose bytes have not been hashed is none of the four operator states. Query output shows it as `unverified`, and `--drift unverified` selects it.
 
 | Operator state | Columns |
 | --- | --- |
@@ -425,6 +432,15 @@ A missing URI sets `presence` to `missing`. A size or mtime change sets `stat_st
 | `ok` | present, `stat_state = unchanged`, and `digest_state = match` |
 
 Scan does not merge file ids. Merging a duplicate path onto an existing file id happens during ingest.
+
+### Acknowledge
+
+`bpm acknowledge FILE` names exactly one file, by file id or by the path of one of its locations. A directory is refused, and the command takes no second file, no backend, no glob, and no `--all`. Accepting drift is a decision about one file, so it is one command per file.
+
+1. Read every present location of the file in full, with the catalog lock released: BLAKE3, the fingerprint, and MD5 when the file already has a current MD5 or `--md5` is passed. A location that is gone is recorded `missing`. A location that cannot be read fails the command.
+2. If the present locations do not all have the same BLAKE3, refuse and list each location with its digest. Nothing is written. The operator restores or removes the wrong copy and runs acknowledge again.
+3. If the BLAKE3 matches the current one and every location is already `ok`, report that there is nothing to acknowledge and write nothing.
+4. Otherwise, in one write transaction: when the bytes are new, clear `current` on every digest of the file and insert the observed digests as generation `max(generation) + 1`. When they match the current BLAKE3, keep the generation and accept only the stat. Write the size, mtime, and fingerprint to `files`, and mark each present location `present`, `unchanged`, `match` with its new stat. A location found missing keeps `missing`, and after a new generation its `digest_state` returns to `unverified`, because those bytes were never compared with the new digest.
 
 ### Object storage later
 
@@ -503,7 +519,9 @@ A startup log line states the bind address. It does not state the token.
 
 Clap 4 derive parser. The binary name is `bpm`. The subcommands Core implements are the rows in PRD §4.13 whose Unstable cell is empty. `--catalog` is a global argument. `--format` applies to commands that print rows. On `bpm query` the flag set is still the §4.8 sketch.
 
-Output goes to stdout. Diagnostics go to stderr. Exit status is `0` on success and non-zero on a rejected command.
+Output goes to stdout. Diagnostics go to stderr. Exit status is `0` on success and non-zero on a rejected command. `bpm ingest` and `bpm scan` also exit non-zero when any path could not be read. The paths they could read are committed first.
+
+`bpm delete` takes an entity, `--location PATH`, or `--file FILE`. A file is named by its id or by one of its location paths. `--file` refuses a file with links unless `--cascade` removes them too. None of these touch bytes on disk. `bpm link FILE ENTITY --role ROLE` and `bpm unlink FILE ENTITY` name the file the same way.
 
 `bpm login`, `bpm logout`, and `bpm use` are marked `*` in PRD §4.13. Core does not register them. The token typed into `bpm serve` is not `bpm login`. When a Govern client exists, those commands with no server configured fail with a short message, and they do not report that a login succeeded.
 

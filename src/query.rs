@@ -1,6 +1,6 @@
 //! Rendering for `bpm query` and `bpm sql`. No database access.
 
-use crate::model::EntityRow;
+use crate::model::{EntityRow, FileRow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderFormat {
@@ -40,6 +40,57 @@ pub fn render_entities(rows: &[EntityRow], format: RenderFormat) -> String {
     }
 }
 
+/// One row per file. Table and CSV join several locations or links with `; `.
+pub fn render_files(rows: &[FileRow], format: RenderFormat) -> String {
+    const HEADERS: [&str; 6] = ["id", "size", "digest", "drift", "locations", "links"];
+    match format {
+        RenderFormat::Table => {
+            render_table(&HEADERS, &rows.iter().map(file_cells).collect::<Vec<_>>())
+        }
+        RenderFormat::Csv => render_csv(&HEADERS, &rows.iter().map(file_cells).collect::<Vec<_>>()),
+        RenderFormat::Json => {
+            let items: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "id": row.id.to_string(),
+                        "size": row.size,
+                        "mtime": row.mtime,
+                        "fingerprint": row.fingerprint.as_ref().map(|print| serde_json::json!({
+                            "scheme": print.scheme,
+                            "hex": print.hex,
+                        })),
+                        "digests": row.digests.iter().map(|digest| serde_json::json!({
+                            "digest": digest.wire(),
+                            "source": digest.source,
+                            "generation": digest.generation,
+                        })).collect::<Vec<_>>(),
+                        "drift": row.drift().iter().map(|state| state.slug()).collect::<Vec<_>>(),
+                        "locations": row.locations.iter().map(|location| serde_json::json!({
+                            "backend": location.backend,
+                            "uri": location.uri,
+                            "presence": location.presence,
+                            "stat_state": location.stat_state,
+                            "digest_state": location.digest_state,
+                            "drift": location.drift().iter().map(|state| state.slug()).collect::<Vec<_>>(),
+                            "last_seen_at": location.last_seen_at,
+                        })).collect::<Vec<_>>(),
+                        "links": row.links.iter().map(|link| serde_json::json!({
+                            "node_type": link.node_type.slug(),
+                            "node_id": link.node_id.to_string(),
+                            "role": link.role,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into())
+            )
+        }
+    }
+}
+
 pub fn render_sql(columns: &[String], rows: &[Vec<String>]) -> String {
     let headers: Vec<&str> = columns.iter().map(String::as_str).collect();
     render_table(&headers, rows)
@@ -52,6 +103,33 @@ fn entity_cells(row: &EntityRow) -> Vec<String> {
         row.path.clone().unwrap_or_default(),
         row.name.clone().unwrap_or_default(),
         metadata_text(&row.metadata),
+    ]
+}
+
+fn file_cells(row: &FileRow) -> Vec<String> {
+    vec![
+        row.id.to_string(),
+        row.size.map(|size| size.to_string()).unwrap_or_default(),
+        row.digests
+            .iter()
+            .find(|digest| digest.algorithm == "blake3")
+            .map(|digest| digest.wire())
+            .unwrap_or_default(),
+        row.drift()
+            .iter()
+            .map(|state| state.slug())
+            .collect::<Vec<_>>()
+            .join(","),
+        row.locations
+            .iter()
+            .map(|location| location.uri.as_str())
+            .collect::<Vec<_>>()
+            .join("; "),
+        row.links
+            .iter()
+            .map(|link| format!("{} {} {}", link.node_type.slug(), link.node_id, link.role))
+            .collect::<Vec<_>>()
+            .join("; "),
     ]
 }
 
