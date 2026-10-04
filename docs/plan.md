@@ -34,7 +34,7 @@ PRD slice B, local filesystem only. Scenarios 10–21, except the object-store h
 - The built-in blacklist, a global list in `~/.bpm/config.toml`, `--blacklist` for one run, and the glob whitelist.
 - `bpm scan --md5` when an archive requires MD5. It is off unless the flag is passed.
 
-After this stage the benchmark catalog can be loaded. Scenario 31 runs before stage 4.
+After this stage the benchmark catalog can be loaded. Scenario 31 runs before stage 4. It passed on 2026-10-04, after two library fixes it exposed: [Scenario 31 benchmark](benchmarks/scenario31.md).
 
 ## 3. Object stores
 

@@ -200,7 +200,9 @@ A Sample cannot name a Project: the column `samples.case_id` references `cases` 
 
 A view `entities` is the `UNION ALL` of the six tables, with columns `node_type`, `id`, `parent_id`, and `name` (`name` is null below Project). A filter on `node_type` skips the other branches. The view is not a second store. Catalog reads and ad hoc SQL may use it. Writes go to the typed table. A UUID lookup without a type reads this view, which probes the six primary keys.
 
-Descendant sets are computed by joining these tables along the parent columns. The chain is at most five steps. The schema does not store a closure. Add one only if the benchmark shows that gathering descendant ids, rather than reading link and file rows, is the slow step.
+Descendant sets are computed by joining these tables along the parent columns. The chain is at most five steps. The schema does not store a closure. Add one only if the benchmark shows that gathering descendant ids, rather than reading link and file rows, is the slow step. Scenario 31 did not: loading 100,000 entities and checking their parents takes about 50 ms.
+
+The library loads the tree (ids, parents, names) into memory to resolve addresses and walk descendants. It does not load metadata. A metadata selector is a lookup on `entity_metadata (key, value)`, and metadata is read only for the rows a command returns. Loading every metadata pair was what made each command take 4 s at 5,000,000 pairs.
 
 ### entity_metadata
 
@@ -607,7 +609,7 @@ Tests:
 | Ingest and scan fixtures | Directories of small files, a symlink, an unreadable file, a simulated move, a second path with the same bytes |
 | Later milestones | Canonical manifest JSON and `--refresh-snapshot` when PRD §4.10 is finalized. Cycle rejection on derived-from edges when PRD §4.7 is built |
 | Policy unit tests | Govern acceptance items 4–7, on the pure function, when that module exists. PRD §5 is unstable, so these are not Core tests |
-| Benchmark | Synthetic 1,000,000-file catalog, timed queries from PRD scenario 31. Not part of the default `cargo test` run. The engine comparison that chose SQLite is a separate harness in `benches/engine_comparison` |
+| Benchmark | Synthetic 1,000,000-file catalog, timed queries from PRD scenario 31: `cargo bench --bench scenario31`. Not part of the default `cargo test` run. Results are in [Scenario 31 benchmark](../benchmarks/scenario31.md). The engine comparison that chose SQLite is a separate harness in `benches/engine_comparison` |
 
 The benchmark builds rows with the library's insert path or a bulk loader that writes the same schema, so it measures the real tables. It is a binary under `cargo bench` or an example, and it prints elapsed times. It does not fail the build on a threshold in the first cut, because developer laptops vary. The threshold becomes a gate when there is a reference machine.
 

@@ -66,7 +66,6 @@ struct NodeRec {
     id: Uuid,
     parent_id: Option<Uuid>,
     name: Option<String>,
-    metadata: BTreeMap<String, String>,
 }
 
 struct Index {
@@ -253,7 +252,7 @@ impl Catalog {
         let index = load_index(&tx)?;
         let parent_id = if let Some(parent) = parent {
             let expected = node_type.parent_type().ok_or(Error::IllegalParent)?;
-            let parent_node = resolve_one(&index, parent)?;
+            let parent_node = resolve_one(&tx, &index, parent)?;
             if parent_node.node_type != expected {
                 return Err(Error::IllegalParent);
             }
@@ -289,7 +288,7 @@ impl Catalog {
         let stamp = timestamp();
         let tx = begin(&mut self.conn, &self.path)?;
         let index = load_index(&tx)?;
-        let node = resolve_one(&index, target)?;
+        let node = resolve_one(&tx, &index, target)?;
         if !node.node_type.takes_name() {
             return Err(Error::NotRenameable);
         }
@@ -309,9 +308,9 @@ impl Catalog {
         let stamp = timestamp();
         let tx = begin(&mut self.conn, &self.path)?;
         let index = load_index(&tx)?;
-        let node = resolve_one(&index, target)?;
+        let node = resolve_one(&tx, &index, target)?;
         let expected = node.node_type.parent_type().ok_or(Error::ProgramNoParent)?;
-        let parent = resolve_one(&index, new_parent)?;
+        let parent = resolve_one(&tx, &index, new_parent)?;
         if parent.node_type != expected {
             return Err(Error::IllegalParent);
         }
@@ -331,7 +330,7 @@ impl Catalog {
         self.require_write()?;
         let tx = begin(&mut self.conn, &self.path)?;
         let index = load_index(&tx)?;
-        let node = resolve_one(&index, target)?;
+        let node = resolve_one(&tx, &index, target)?;
         let mut ids = vec![node.id];
         collect_descendants(node.id, &index, &mut ids);
         if !cascade {
@@ -358,7 +357,7 @@ impl Catalog {
         let stamp = timestamp();
         let tx = begin(&mut self.conn, &self.path)?;
         let index = load_index(&tx)?;
-        let node = resolve_one(&index, target)?;
+        let node = resolve_one(&tx, &index, target)?;
         tx.execute(
             "INSERT INTO entity_metadata (node_type, node_id, key, value, updated_at)
              VALUES (?, ?, ?, ?, ?)
@@ -385,20 +384,16 @@ impl Catalog {
         // One read transaction, so the nodes and their metadata are one snapshot.
         let snapshot = self.conn.transaction()?;
         let index = load_index(&snapshot)?;
-        let node = resolve_one(&index, target)?;
+        let node = resolve_one(&snapshot, &index, target)?;
+        let metadata = metadata_of(&snapshot, node.node_type, node.id)?;
         if let Some(key) = key {
             validate_meta_token(key)?;
-            let value = node
-                .metadata
+            let value = metadata
                 .get(key)
                 .ok_or_else(|| Error::MetaMissing(key.to_string()))?;
             Ok(vec![(key.to_string(), value.clone())])
         } else {
-            Ok(node
-                .metadata
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect())
+            Ok(metadata.into_iter().collect())
         }
     }
 
@@ -407,7 +402,7 @@ impl Catalog {
         validate_meta_token(key)?;
         let tx = begin(&mut self.conn, &self.path)?;
         let index = load_index(&tx)?;
-        let node = resolve_one(&index, target)?;
+        let node = resolve_one(&tx, &index, target)?;
         let changed = tx.execute(
             "DELETE FROM entity_metadata WHERE node_type = ? AND node_id = ? AND key = ?",
             params![node.node_type.slug(), node.id.to_string(), key],
@@ -424,7 +419,7 @@ impl Catalog {
         let snapshot = self.conn.transaction()?;
         let index = load_index(&snapshot)?;
         let mut ids: Vec<Uuid> = if let Some(under) = &query.under {
-            let roots = resolve_all(&index, under)?;
+            let roots = resolve_all(&snapshot, &index, under)?;
             let mut gathered = Vec::new();
             let mut seen = HashSet::new();
             for root in roots {
@@ -437,14 +432,9 @@ impl Catalog {
         } else {
             index.nodes.iter().map(|node| node.id).collect()
         };
-        if !query.wheres.is_empty() {
-            ids.retain(|id| {
-                let node = index.get(*id);
-                query
-                    .wheres
-                    .iter()
-                    .all(|selector| selector.matches(&node.metadata))
-            });
+        for selector in &query.wheres {
+            let matched = selector_matches(&snapshot, &index, selector)?;
+            ids.retain(|id| matched.contains(id));
         }
         if let Some(node_type) = query.node_type {
             ids.retain(|id| index.get(*id).node_type == node_type);
@@ -458,7 +448,7 @@ impl Catalog {
                     id: node.id,
                     path: path_of(node, &index)?,
                     name: node.name.clone(),
-                    metadata: node.metadata.clone(),
+                    metadata: metadata_of(&snapshot, node.node_type, node.id)?,
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -975,6 +965,9 @@ fn find_problems(conn: &Connection) -> Result<Vec<Problem>, Error> {
     Ok(found)
 }
 
+/// The entity tree, without metadata. Metadata is read from the catalog only
+/// for the selectors a command uses and the rows it returns, so a command does
+/// not pay for every metadata pair in the catalog.
 fn load_index(conn: &Connection) -> Result<Index, Error> {
     let mut nodes = Vec::new();
     {
@@ -1002,32 +995,7 @@ fn load_index(conn: &Connection) -> Result<Index, Error> {
                 id,
                 parent_id,
                 name,
-                metadata: BTreeMap::new(),
             });
-        }
-    }
-    {
-        let mut stmt = conn.prepare("SELECT node_id, key, value FROM entity_metadata")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let positions: HashMap<Uuid, usize> = nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| (node.id, index))
-            .collect();
-        for row in rows {
-            let (node_id, key, value) = row?;
-            let Ok(node_id) = Uuid::parse_str(&node_id) else {
-                continue;
-            };
-            if let Some(position) = positions.get(&node_id) {
-                nodes[*position].metadata.insert(key, value);
-            }
         }
     }
     let mut by_id = HashMap::new();
@@ -1060,7 +1028,7 @@ impl Index {
 /// Selectors after an anchor search that anchor's descendants. The anchor itself
 /// is not required to match the first selector. Each later selector searches the
 /// current matches and their descendants.
-fn resolve_all(index: &Index, address: &str) -> Result<Vec<Uuid>, Error> {
+fn resolve_all(conn: &Connection, index: &Index, address: &str) -> Result<Vec<Uuid>, Error> {
     let parsed = parse_address(address)?;
     let (anchors, selectors) = match parsed {
         Address::Path {
@@ -1100,6 +1068,7 @@ fn resolve_all(index: &Index, address: &str) -> Result<Vec<Uuid>, Error> {
     }
     let mut current = anchors;
     for (ordinal, selector) in selectors.iter().enumerate() {
+        let matched = selector_matches(conn, index, selector)?;
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
         for id in &current {
@@ -1110,19 +1079,81 @@ fn resolve_all(index: &Index, address: &str) -> Result<Vec<Uuid>, Error> {
         }
         current = candidates
             .into_iter()
-            .filter(|id| selector.matches(&index.get(*id).metadata))
+            .filter(|id| matched.contains(id))
             .collect();
     }
     Ok(current)
 }
 
-fn resolve_one<'a>(index: &'a Index, address: &str) -> Result<&'a NodeRec, Error> {
-    let ids = resolve_all(index, address)?;
+fn resolve_one<'a>(
+    conn: &Connection,
+    index: &'a Index,
+    address: &str,
+) -> Result<&'a NodeRec, Error> {
+    let ids = resolve_all(conn, index, address)?;
     match ids.as_slice() {
         [id] => Ok(index.get(*id)),
         [] => Err(Error::NotFound(address.to_string())),
         _ => Err(Error::Ambiguous(address.to_string())),
     }
+}
+
+/// Entities whose metadata matches one selector, from the `(key, value)` index.
+/// A value-only selector reads every metadata row. A row whose node type does
+/// not match the entity it names is ignored, as `bpm repair` would remove it.
+fn selector_matches(
+    conn: &Connection,
+    index: &Index,
+    selector: &Selector,
+) -> Result<HashSet<Uuid>, Error> {
+    let (sql, values): (&str, Vec<&String>) = match (&selector.key, &selector.value) {
+        (Some(key), Some(value)) => (
+            "SELECT node_type, node_id FROM entity_metadata WHERE key = ? AND value = ?",
+            vec![key, value],
+        ),
+        (Some(key), None) => (
+            "SELECT node_type, node_id FROM entity_metadata WHERE key = ?",
+            vec![key],
+        ),
+        (None, Some(value)) => (
+            "SELECT node_type, node_id FROM entity_metadata WHERE value = ?",
+            vec![value],
+        ),
+        (None, None) => return Ok(HashSet::new()),
+    };
+    let mut stmt = conn.prepare_cached(sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(values))?;
+    let mut matched = HashSet::new();
+    while let Some(row) = rows.next()? {
+        let node_type: String = row.get(0)?;
+        let Ok(id) = Uuid::parse_str(&row.get::<_, String>(1)?) else {
+            continue;
+        };
+        if index
+            .lookup(id)
+            .is_some_and(|node| node.node_type.slug() == node_type)
+        {
+            matched.insert(id);
+        }
+    }
+    Ok(matched)
+}
+
+/// One entity's metadata, by key.
+fn metadata_of(
+    conn: &Connection,
+    node_type: NodeType,
+    id: Uuid,
+) -> Result<BTreeMap<String, String>, Error> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT key, value FROM entity_metadata WHERE node_type = ? AND node_id = ? ORDER BY key",
+    )?;
+    let pairs = stmt
+        .query_map(params![node_type.slug(), id.to_string()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    Ok(pairs)
 }
 
 fn collect_descendants(id: Uuid, index: &Index, out: &mut Vec<Uuid>) {

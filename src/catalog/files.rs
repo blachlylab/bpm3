@@ -5,7 +5,7 @@
 //! that take the write lock only apply what was already computed, so the lock
 //! is held for the length of one batch's inserts.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
@@ -579,7 +579,7 @@ impl Catalog {
         }
         let tx = begin(&mut self.conn, &self.path)?;
         let index = load_index(&tx)?;
-        let node = resolve_one(&index, entity)?;
+        let node = resolve_one(&tx, &index, entity)?;
         let (node_type, node_id) = (node.node_type, node.id);
         let file_id = resolve_file(&tx, file)?;
         tx.execute(
@@ -595,7 +595,7 @@ impl Catalog {
         self.require_write()?;
         let tx = begin(&mut self.conn, &self.path)?;
         let index = load_index(&tx)?;
-        let node = resolve_one(&index, entity)?;
+        let node = resolve_one(&tx, &index, entity)?;
         let (node_type, node_id) = (node.node_type, node.id);
         let file_id = resolve_file(&tx, file)?;
         let removed = tx.execute(
@@ -661,7 +661,7 @@ impl Catalog {
             let index = load_index(&snapshot)?;
             let mut nodes = Vec::new();
             let mut seen = HashSet::new();
-            for root in resolve_all(&index, under)? {
+            for root in resolve_all(&snapshot, &index, under)? {
                 if seen.insert(root) {
                     nodes.push(root);
                 }
@@ -679,12 +679,14 @@ impl Catalog {
                     insert.execute(params![index.get(id).node_type.slug(), id.to_string()])?;
                 }
             }
+            // The entity set drives the join (`CROSS JOIN`), through the
+            // `(node_type, node_id)` index on links.
             let mut clause = String::from(
-                "f.id IN (SELECT l.file_id FROM file_links l
-                 JOIN temp.bpm_under u ON u.node_type = l.node_type AND u.id = l.node_id",
+                "f.id IN (SELECT l.file_id FROM temp.bpm_under u CROSS JOIN file_links l
+                 WHERE l.node_type = u.node_type AND l.node_id = u.id",
             );
             if let Some(role) = &query.role {
-                clause.push_str(" WHERE l.role = ?");
+                clause.push_str(" AND l.role = ?");
                 values.push(Value::Text(role.clone()));
             }
             clause.push(')');
@@ -726,10 +728,7 @@ impl Catalog {
             stmt.query_map(params_from_iter(values), |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let rows = ids
-            .iter()
-            .map(|id| load_file(&snapshot, id))
-            .collect::<Result<Vec<_>, _>>()?;
+        let rows = load_files(&snapshot, &ids)?;
         if query.under.is_some() {
             snapshot.execute("DROP TABLE IF EXISTS temp.bpm_under", [])?;
         }
@@ -945,81 +944,132 @@ fn resolve_file(conn: &Connection, file: &FileRef) -> Result<String, Error> {
 }
 
 fn load_file(conn: &Connection, id: &str) -> Result<FileRow, Error> {
-    let (size, mtime, hex, scheme) = conn
-        .prepare_cached(
-            "SELECT size_bytes, mtime, fingerprint, fingerprint_scheme FROM files WHERE id = ?",
-        )?
-        .query_row([id], |row| {
-            Ok((
-                row.get::<_, Option<i64>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?;
-    let digests = conn
-        .prepare_cached(
-            "SELECT algorithm, digest, source, generation, current FROM file_digests
-             WHERE file_id = ? AND current = 1 ORDER BY algorithm",
-        )?
-        .query_map([id], digest_row)?
-        .collect::<Result<Vec<_>, _>>()?;
-    let locations = conn
-        .prepare_cached(
-            "SELECT backend, uri, presence, stat_state, digest_state, last_seen_at
-             FROM file_locations WHERE file_id = ? ORDER BY backend, uri",
-        )?
-        .query_map([id], |row| {
-            Ok(LocationRow {
-                backend: row.get(0)?,
-                uri: row.get(1)?,
-                presence: row.get(2)?,
-                stat_state: row.get(3)?,
-                digest_state: row.get(4)?,
-                last_seen_at: row.get(5)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let raw_links = conn
-        .prepare_cached(
-            "SELECT node_type, node_id, role FROM file_links WHERE file_id = ? ORDER BY node_type, node_id",
-        )?
-        .query_map([id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut links = Vec::with_capacity(raw_links.len());
-    for (node_type, node_id, role) in raw_links {
-        // A link that names a missing or malformed entity is `bpm repair`'s
-        // business; a query still shows the rest of the file.
-        let (Some(node_type), Ok(node_id)) =
-            (NodeType::parse(&node_type), Uuid::parse_str(&node_id))
-        else {
-            continue;
-        };
-        links.push(LinkRow {
-            node_type,
-            node_id,
-            role,
-        });
+    let mut rows = load_files(conn, &[id.to_string()])?;
+    rows.pop()
+        .ok_or_else(|| Error::FileNotFound(id.to_string()))
+}
+
+/// Files with their current digests, locations, and links, in the order of
+/// `ids`. The ids go into a temporary table and each detail table is read in
+/// one join, so the cost is a few statements however many files are asked for.
+/// `CROSS JOIN` keeps the temporary table as the outer loop: it has no
+/// statistics, and the planner would otherwise scan a million-row table and
+/// probe it. Rows within one file come in each table's key order, which is the
+/// order the old per-file queries used.
+fn load_files(conn: &Connection, ids: &[String]) -> Result<Vec<FileRow>, Error> {
+    conn.execute("DROP TABLE IF EXISTS temp.bpm_result", [])?;
+    conn.execute(
+        "CREATE TEMP TABLE bpm_result (id TEXT PRIMARY KEY) WITHOUT ROWID",
+        [],
+    )?;
+    {
+        let mut insert = conn.prepare("INSERT OR IGNORE INTO temp.bpm_result (id) VALUES (?)")?;
+        for id in ids {
+            insert.execute([id])?;
+        }
     }
-    let fingerprint = match (hex, scheme) {
-        (Some(hex), Some(scheme)) => Some(Fingerprint { scheme, hex }),
-        _ => None,
-    };
-    Ok(FileRow {
-        id: parse_id(id)?,
-        size,
-        mtime,
-        fingerprint,
-        digests,
-        locations,
-        links,
-    })
+    let mut rows = Vec::with_capacity(ids.len());
+    let mut stored = Vec::with_capacity(ids.len());
+    let mut position = HashMap::with_capacity(ids.len());
+    {
+        let mut stmt = conn.prepare(
+            "SELECT f.id, f.size_bytes, f.mtime, f.fingerprint, f.fingerprint_scheme
+             FROM temp.bpm_result r CROSS JOIN files f WHERE f.id = r.id",
+        )?;
+        let mut found = stmt.query([])?;
+        while let Some(row) = found.next()? {
+            let id: String = row.get(0)?;
+            let fingerprint = match (row.get::<_, Option<String>>(3)?, row.get(4)?) {
+                (Some(hex), Some(scheme)) => Some(Fingerprint { scheme, hex }),
+                _ => None,
+            };
+            position.insert(id.clone(), rows.len());
+            stored.push(id.clone());
+            rows.push(FileRow {
+                id: parse_id(&id)?,
+                size: row.get(1)?,
+                mtime: row.get(2)?,
+                fingerprint,
+                digests: Vec::new(),
+                locations: Vec::new(),
+                links: Vec::new(),
+            });
+        }
+    }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT d.algorithm, d.digest, d.source, d.generation, d.current, d.file_id
+             FROM temp.bpm_result r CROSS JOIN file_digests d
+             WHERE d.file_id = r.id AND d.current = 1",
+        )?;
+        let mut found = stmt.query([])?;
+        while let Some(row) = found.next()? {
+            if let Some(&at) = position.get(&row.get::<_, String>(5)?) {
+                rows[at].digests.push(digest_row(row)?);
+            }
+        }
+    }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT l.file_id, l.backend, l.uri, l.presence, l.stat_state, l.digest_state, l.last_seen_at
+             FROM temp.bpm_result r CROSS JOIN file_locations l
+             WHERE l.file_id = r.id",
+        )?;
+        let mut found = stmt.query([])?;
+        while let Some(row) = found.next()? {
+            if let Some(&at) = position.get(&row.get::<_, String>(0)?) {
+                rows[at].locations.push(LocationRow {
+                    backend: row.get(1)?,
+                    uri: row.get(2)?,
+                    presence: row.get(3)?,
+                    stat_state: row.get(4)?,
+                    digest_state: row.get(5)?,
+                    last_seen_at: row.get(6)?,
+                });
+            }
+        }
+    }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT k.file_id, k.node_type, k.node_id, k.role
+             FROM temp.bpm_result r CROSS JOIN file_links k
+             WHERE k.file_id = r.id",
+        )?;
+        let mut found = stmt.query([])?;
+        while let Some(row) = found.next()? {
+            let Some(&at) = position.get(&row.get::<_, String>(0)?) else {
+                continue;
+            };
+            // A link that names a missing or malformed entity is `bpm repair`'s
+            // business; a query still shows the rest of the file.
+            let (Some(node_type), Ok(node_id)) = (
+                NodeType::parse(&row.get::<_, String>(1)?),
+                Uuid::parse_str(&row.get::<_, String>(2)?),
+            ) else {
+                continue;
+            };
+            rows[at].links.push(LinkRow {
+                node_type,
+                node_id,
+                role: row.get(3)?,
+            });
+        }
+    }
+    conn.execute("DROP TABLE temp.bpm_result", [])?;
+    // The join returns rows in the temporary table's key order; the caller's
+    // order is the order of `ids`.
+    let order: HashMap<&str, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(at, id)| (id.as_str(), at))
+        .collect();
+    let mut keyed: Vec<(usize, FileRow)> = stored
+        .iter()
+        .zip(rows)
+        .map(|(id, row)| (order[id.as_str()], row))
+        .collect();
+    keyed.sort_by_key(|(at, _)| *at);
+    Ok(keyed.into_iter().map(|(_, row)| row).collect())
 }
 
 fn digest_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigestRow> {

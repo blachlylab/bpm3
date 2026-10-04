@@ -1,0 +1,42 @@
+{
+  "entities --under a Project --type case": {
+    "best_ms": 79.1,
+    "first_ms": 79.1,
+    "rows": 1000
+  },
+  "entities --where k03:v42 (1,000 values)": {
+    "best_ms": 62.3,
+    "first_ms": 62.3,
+    "rows": 100
+  },
+  "entities --where subject_id:<one Case>": {
+    "best_ms": 57.1,
+    "first_ms": 59.4,
+    "rows": 1
+  },
+  "files --digest blake3:<one file>": {
+    "best_ms": 23.7,
+    "first_ms": 24.6,
+    "rows": 1
+  },
+  "files --drift missing": {
+    "best_ms": 823.9,
+    "first_ms": 829.1,
+    "rows": 0
+  },
+  "files --under a Case": {
+    "best_ms": 59.0,
+    "first_ms": 59.0,
+    "rows": 100
+  },
+  "files --under a Project": {
+    "best_ms": 821.3,
+    "first_ms": 849.4,
+    "rows": 100000
+  },
+  "files --unlinked": {
+    "best_ms": 360.2,
+    "first_ms": 365.6,
+    "rows": 0
+  }
+}
