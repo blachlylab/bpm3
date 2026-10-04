@@ -1,7 +1,7 @@
 //! Command line for the catalog notebook. Flag spelling for `bpm query` follows
 //! the PRD §4.8 sketch and may change.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::catalog::{self, Catalog, EntityQuery, SqlOutcome};
 use crate::error::Error;
 use crate::model::NodeType;
+use crate::perms;
 use crate::query::{self, RenderFormat};
 
 #[derive(Parser)]
@@ -72,6 +73,13 @@ enum Command {
         write: bool,
         #[arg(allow_hyphen_values = true)]
         statement: String,
+    },
+    /// Check the catalog's integrity. With --apply, remove the rows that break it.
+    Repair {
+        /// Remove every reported row in one transaction. An entity whose parent
+        /// is missing is removed with its descendants, metadata, and file links.
+        #[arg(long)]
+        apply: bool,
     },
     /// Structured query. The flag spelling is the §4.8 sketch.
     Query {
@@ -192,6 +200,7 @@ pub fn run() -> ExitCode {
 fn dispatch() -> Result<(), Error> {
     crate::migrate::check_contiguous()?;
     let cli = Cli::parse();
+    warn_if_bpm_dir_is_shared();
     match cli.command {
         Command::Init { path, force } => {
             let path = match path {
@@ -221,11 +230,11 @@ fn dispatch() -> Result<(), Error> {
             catalog.rename(&target, &new_name)?;
         }
         Command::Reparent { target, new_parent } => {
-            let mut catalog = open_write(cli.catalog.as_deref())?;
+            let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
             catalog.reparent(&target, &new_parent)?;
         }
         Command::Delete { target, cascade } => {
-            let mut catalog = open_write(cli.catalog.as_deref())?;
+            let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
             catalog.delete(&target, cascade)?;
         }
         Command::Meta { action } => match action {
@@ -251,9 +260,9 @@ fn dispatch() -> Result<(), Error> {
         },
         Command::Sql { write, statement } => {
             let mut catalog = if write {
-                open_write(cli.catalog.as_deref())?
+                open_write_unchecked(cli.catalog.as_deref())?
             } else {
-                open_read(cli.catalog.as_deref())?
+                open_read_unchecked(cli.catalog.as_deref())?
             };
             match catalog.run_sql(&statement)? {
                 SqlOutcome::Rows { columns, rows } => {
@@ -261,6 +270,33 @@ fn dispatch() -> Result<(), Error> {
                 }
                 SqlOutcome::Executed { rows_affected } => {
                     println!("rows affected: {rows_affected}")
+                }
+            }
+        }
+        Command::Repair { apply } => {
+            if apply {
+                let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
+                let (removed, descendants) = catalog.repair()?;
+                if removed.is_empty() {
+                    println!("catalog is consistent");
+                } else {
+                    println!("removed:");
+                    print_problems(&removed);
+                    if descendants > 0 {
+                        println!(
+                            "{descendants} descendant entities of those, with their metadata and file links"
+                        );
+                    }
+                }
+            } else {
+                let mut catalog = open_read_unchecked(cli.catalog.as_deref())?;
+                let found = catalog.problems()?;
+                if found.is_empty() {
+                    println!("catalog is consistent");
+                } else {
+                    print_problems(&found);
+                    let rows = found.iter().map(|problem| problem.keys.len()).sum();
+                    return Err(Error::RepairNeeded(rows));
                 }
             }
         }
@@ -293,10 +329,62 @@ fn dispatch() -> Result<(), Error> {
     Ok(())
 }
 
-fn open_read(flag: Option<&std::path::Path>) -> Result<Catalog, Error> {
+/// Opens for reading and refuses a catalog whose entity tree is broken. Every
+/// command that walks or extends the tree uses this or [`open_write`].
+fn open_read(flag: Option<&Path>) -> Result<Catalog, Error> {
+    let catalog = open_read_unchecked(flag)?;
+    catalog.check_tree()?;
+    Ok(catalog)
+}
+
+fn open_write(flag: Option<&Path>) -> Result<Catalog, Error> {
+    let catalog = open_write_unchecked(flag)?;
+    catalog.check_tree()?;
+    Ok(catalog)
+}
+
+/// For the commands an operator uses to inspect or fix a broken tree:
+/// `sql`, `repair`, `reparent`, and `delete`.
+fn open_read_unchecked(flag: Option<&Path>) -> Result<Catalog, Error> {
     Catalog::open_read(&catalog::resolve_catalog_path(flag)?)
 }
 
-fn open_write(flag: Option<&std::path::Path>) -> Result<Catalog, Error> {
+fn open_write_unchecked(flag: Option<&Path>) -> Result<Catalog, Error> {
     Catalog::open_write(&catalog::resolve_catalog_path(flag)?)
+}
+
+/// At most this many rows are listed per problem.
+const LISTED: usize = 20;
+
+fn print_problems(problems: &[catalog::Problem]) {
+    for problem in problems {
+        println!(
+            "{}: {} row(s), {}",
+            problem.table,
+            problem.keys.len(),
+            problem.issue
+        );
+        for key in problem.keys.iter().take(LISTED) {
+            println!("  {key}");
+        }
+        if problem.keys.len() > LISTED {
+            println!("  … and {} more", problem.keys.len() - LISTED);
+        }
+    }
+}
+
+/// `~/.bpm` holds catalogs and should be readable only by its owner. A wider
+/// mode is reported on every command, but does not stop it.
+fn warn_if_bpm_dir_is_shared() {
+    let Ok(home) = catalog::home_dir() else {
+        return;
+    };
+    let dir = home.join(".bpm");
+    if let Some(mode) = perms::shared_mode(&dir) {
+        eprintln!(
+            "bpm: warning: {} is mode {mode:03o}, so other users may be able to read it; run `chmod 700 {}`",
+            dir.display(),
+            dir.display()
+        );
+    }
 }

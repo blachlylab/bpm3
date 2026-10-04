@@ -55,33 +55,31 @@ pub fn inspect(conn: &Connection) -> Result<SchemaState, Error> {
     if application_id != APPLICATION_ID {
         return Ok(SchemaState::Foreign);
     }
-    let has_programs = table_exists(conn, "programs")?;
-    let has_meta = table_exists(conn, "catalog_meta")?;
-    if !has_meta {
-        return Ok(if has_programs {
-            SchemaState::Corrupt
-        } else {
-            SchemaState::Empty
-        });
+    let tables: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
+        [],
+        |row| row.get(0),
+    )?;
+    if tables == 0 {
+        return Ok(SchemaState::Empty);
     }
-    let Some(value) = conn
+    // Every migration writes its tables and the version in one transaction, so
+    // tables without a valid version mean something else changed this file.
+    if !table_exists(conn, "catalog_meta")? {
+        return Ok(SchemaState::Corrupt);
+    }
+    let version = conn
         .query_row(
             "SELECT value FROM catalog_meta WHERE key = 'schema_version'",
             [],
             |row| row.get::<_, String>(0),
         )
         .optional()?
-    else {
-        return Ok(if has_programs {
-            SchemaState::Corrupt
-        } else {
-            SchemaState::Empty
-        });
-    };
-    match value.parse::<i64>() {
-        Ok(version) => Ok(SchemaState::Version(version)),
-        Err(_) => Ok(SchemaState::Corrupt),
-    }
+        .and_then(|value| value.parse::<i64>().ok());
+    Ok(match version {
+        Some(version) if version >= 1 => SchemaState::Version(version),
+        _ => SchemaState::Corrupt,
+    })
 }
 
 /// Refuse anything other than the newest embedded version. Does not write.
@@ -113,14 +111,17 @@ pub fn apply(conn: &mut Connection) -> Result<(), Error> {
         SchemaState::Version(found) if found > supported => {
             return Err(Error::SchemaNewer { found, supported });
         }
-        SchemaState::Version(found) if found < 0 => return Err(Error::CorruptSchema),
         SchemaState::Version(found) => found,
         SchemaState::Corrupt => return Err(Error::CorruptSchema),
         SchemaState::Foreign => return Err(Error::NotACatalog(path_of(conn))),
     };
     for migration in MIGRATIONS.iter().filter(|m| m.version > current) {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_batch(migration.sql)?;
+        tx.execute_batch(migration.sql)
+            .map_err(|err| Error::MigrationFailed {
+                version: migration.version,
+                message: sqlite_message(err),
+            })?;
         tx.execute(
             "INSERT INTO catalog_meta (key, value) VALUES ('schema_version', ?)
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -138,6 +139,16 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, Error> {
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+/// SQLite's own message, without the SQL text rusqlite attaches to a batch
+/// error, which would print the whole migration file.
+fn sqlite_message(err: rusqlite::Error) -> String {
+    match err {
+        rusqlite::Error::SqliteFailure(_, Some(message)) => message,
+        rusqlite::Error::SqlInputError { msg, .. } => msg,
+        other => other.to_string(),
+    }
 }
 
 fn path_of(conn: &Connection) -> std::path::PathBuf {

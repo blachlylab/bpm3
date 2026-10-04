@@ -137,7 +137,7 @@ Costs:
 - `summary`-style queries are typically 15 to 25 times slower than on DuckDB. They take about 0.5 to 0.8 s at 100M pairs, within target but not instant. Option D is the remedy if that changes.
 - Catalog files are about 60% larger than DuckDB's at this scale.
 - The catalog file must be on a local filesystem. WAL shared memory does not work over NFS or SMB. Data files may still be on network storage. For a core facility, the catalog lives on the server's local disk.
-- Every connection must set `foreign_keys=ON`, which SQLite leaves off by default. A third-party `sqlite3` shell that does not set it can write rows that break a declared key. A future `bpm fsck` can run `PRAGMA foreign_key_check`.
+- Every connection must set `foreign_keys=ON`. Many SQLite builds leave it off by default, although the bundled engine enforces it. A third-party `sqlite3` shell that does not set it can write rows that break a declared key. `bpm` checks the entity tree with `PRAGMA foreign_key_check` before each command that walks it, and `bpm repair` checks and fixes the rest (overview §5).
 - `STRICT` tables need SQLite 3.37 or later, so an older system `sqlite3` shell cannot open a catalog.
 - A file copy taken while a writer is active may miss commits still in the `-wal` file. Copy while no writer is running, or add a `bpm backup` command (overview §14).
 - SQLite runs one query on one core. A query that is slow cannot be made faster with more cores.

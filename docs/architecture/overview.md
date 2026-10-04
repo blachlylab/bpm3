@@ -76,7 +76,7 @@ The trait is the reuse seam. Names here are conceptual; Rust signatures can foll
 
 | Operation group | What it covers |
 | --- | --- |
-| Catalog | Open, migrate to latest, catalog id, label |
+| Catalog | Open, migrate to latest, catalog id, label, integrity check, repair |
 | Entities | Create, rename, reparent, delete, cascade delete |
 | Metadata | Set, unset, list, on entities and on files |
 | Observations | Apply one ingest batch: new locations, sizes, mtimes, fingerprints. Consult existing rows only for a duplicate |
@@ -113,7 +113,7 @@ Remote ingest and scan still run against storage the client can see, or against 
 - A long run's liveness is a separate file, `<catalog>.run-<id>.lock`, held with an exclusive flock for the whole command. It is not the catalog write lock, so other writers proceed between batches. The kernel releases the flock if the process dies. The next open that finds a run still marked `running`, and that can acquire this flock, marks the run `incomplete` and removes the file.
 - Read-write actions from the web UI are Core v2 and are TBD. They are not in v1.
 
-Catalog files and `~/.bpm` are created with mode `0600` for files and `0700` for directories. SQLite creates the `-wal` and `-shm` files beside the catalog with the catalog file's permissions. The embedded engine does not add its own encryption. Disk encryption is the operator's, or the institution's, responsibility. The PRD's statement that anyone who can read the file can read the metadata is this choice.
+Catalog files and `~/.bpm` are created with mode `0600` for files and `0700` for directories. Every command warns on stderr, and still runs, when `~/.bpm` grants any access to group or other users. SQLite creates the `-wal` and `-shm` files beside the catalog with the catalog file's permissions. The embedded engine does not add its own encryption. Disk encryption is the operator's, or the institution's, responsibility. The PRD's statement that anyone who can read the file can read the metadata is this choice.
 
 ### User config
 
@@ -155,9 +155,23 @@ These rules are how the logical schema is written in SQLite. They stay inside th
 | Text | `TEXT` |
 
 - Every table is `STRICT`, so a value of the wrong type is rejected instead of being stored as written. A table whose primary key is not a single integer is also `WITHOUT ROWID`, so the primary key is the table's own B-tree and not a second index.
-- Every connection `bpm` opens sets `foreign_keys=ON`, `busy_timeout`, and, on a writer, `journal_mode=WAL` and `synchronous=FULL`. SQLite turns foreign-key enforcement off by default for each new connection. A third-party SQLite shell that does not set it can write rows that break a declared key, the same way it can bypass any library check.
+- Every connection `bpm` opens sets `foreign_keys=ON`, `busy_timeout`, and, on a writer, `journal_mode=WAL` and `synchronous=FULL`. Whether a new connection enforces foreign keys depends on how SQLite was built. The bundled engine enforces them by default and `bpm` sets the pragma anyway. A third-party SQLite shell often does not enforce them, and can write rows that break a declared key, the same way it can bypass any library check. The integrity check below is how `bpm` notices.
 - `STRICT` needs SQLite 3.37 or later. An older `sqlite3` shell refuses to open the catalog. The bundled engine is far newer.
 - `ANALYZE` (or `PRAGMA optimize`) runs after an ingest or scan that changed many rows, so the planner has the statistics it needs to choose the `(key, value)` indexes.
+
+### Integrity check and repair
+
+Before every command that walks or extends the entity tree, `bpm` runs `PRAGMA foreign_key_check` on the five node tables that have a parent. Any row reported fails the command with "catalog is inconsistent" and the advice to run `bpm repair`. The check covers only the tree because the tree is what every walk depends on, and because it is small. On 100,000 entities it takes about 25 ms. Checking the file tables too would mean reading every metadata row on every command. `sql`, `repair`, `reparent`, and `delete` skip the check, so an operator can inspect and fix a broken tree.
+
+`bpm repair` runs the full check. That covers every declared foreign key, plus the `(node_type, node_id)` references on `entity_metadata` and `file_links`, which are not foreign keys. It lists the rows by key. `--apply` removes them in one `BEGIN IMMEDIATE` transaction:
+- an entity whose parent is missing, with its subtree, through the same path as `delete --cascade`;
+- metadata and link rows that name a missing entity;
+- `file_*` rows that name a missing file;
+- error rows that name a missing run.
+
+The transaction commits only if a whole-catalog `PRAGMA foreign_key_check` and the reference checks then find nothing. File rows are never removed.
+
+A tree walk that still meets a missing parent, for example in a catalog changed between the check and the read, reports the same inconsistency error. It does not panic. The operator procedure, including the gentler fixes to try before `--apply`, is the [repair guide](../guide/repair.md).
 
 ### catalog_meta
 

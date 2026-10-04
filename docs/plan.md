@@ -16,7 +16,7 @@ A stage is done when the §4.15 scenarios named for it pass against a temporary 
 
 ## 1. Catalog notebook
 
-PRD slice A. Scenarios 1–9, 25, 27, and 30.
+PRD slice A. Scenarios 1–9, 25, 27, 30, and 32.
 
 - `bpm init`, catalog resolution, file modes, WAL mode and the `BEGIN IMMEDIATE` write lock, and the schema migrator in [Catalog migrations](architecture/migrations.md).
 - The six node tables, metadata, rename, reparent, and delete. UUIDv7 comes from the library.
@@ -69,6 +69,13 @@ Derived-from edges, impact, lineage, and command history. `bpm sql --write` reco
 ## 7. Govern
 
 Not scheduled. PRD §5 is unstable. When that section is revised, `bpmd` is a second binary on the same library. The transport between `bpm` and `bpmd` is still an open choice: HTTP, or gRPC or something similar.
+
+## Before the next migration (V002)
+
+The runner in `src/migrate.rs` is correct for V001, which only creates tables. Two gaps must close before any V002 ships. Both came from the review of the SQLite switch.
+
+- **Re-read the version inside the write transaction.** `migrate::apply` reads `schema_version` before it takes `BEGIN IMMEDIATE`. Two writers opening an old catalog at once can then both decide to run the same migration. The second one fails on a raw "already exists" error instead of seeing that the work is done. Fix: re-run `inspect` after `BEGIN IMMEDIATE`, and apply only the migrations still newer than what it finds.
+- **Support the table-rebuild procedure.** [Catalog migrations](architecture/migrations.md) describes SQLite's twelve-step rebuild: `foreign_keys` off before `BEGIN`, `PRAGMA foreign_key_check` before `COMMIT`, `foreign_keys` back on after. The runner always opens the transaction first and never changes `foreign_keys`, and `PRAGMA foreign_keys` has no effect inside a transaction. Fix: let a migration declare that it rebuilds tables, and have the runner run that procedure around it. Add a test that rebuilds a referenced table.
 
 ## Not in these stages
 

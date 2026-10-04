@@ -1,4 +1,4 @@
-//! Stage 1 acceptance tests: PRD §4.15 scenarios 1–9, 25, 27, and 30.
+//! Stage 1 acceptance tests: PRD §4.15 scenarios 1–9, 25, 27, 30, and 32.
 //! Each test uses its own HOME and its own catalog files.
 
 use std::fs;
@@ -1601,4 +1601,254 @@ fn later_milestones_are_not_stubbed_as_success() {
         "{}",
         login.err
     );
+}
+
+// Regression tests for the review of the SQLite switch.
+
+/// Open a catalog the way a third-party SQLite shell might: foreign keys off.
+fn raw(catalog: &Path) -> Connection {
+    let conn = Connection::open(catalog).unwrap();
+    conn.pragma_update(None, "foreign_keys", false).unwrap();
+    conn
+}
+
+#[test]
+fn overlapping_inits_leave_exactly_one_catalog() {
+    let scratch = Scratch::new("init-race");
+    let home = scratch.path();
+    for round in 0..10 {
+        let catalog = home.join(format!("race-{round}.db"));
+        let cat = catalog.to_str().unwrap().to_string();
+        let children: Vec<_> = (0..4)
+            .map(|_| {
+                Command::new(env!("CARGO_BIN_EXE_bpm"))
+                    .current_dir(home)
+                    .env("HOME", home)
+                    .env_remove("BPM_CATALOG")
+                    .args(["init", &cat])
+                    .output()
+                    .expect("spawn bpm")
+            })
+            .collect();
+        let winners = children.iter().filter(|out| out.status.success()).count();
+        assert_eq!(winners, 1, "round {round}: {winners} inits succeeded");
+        for out in children.iter().filter(|out| !out.status.success()) {
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(err.contains("already exists"), "round {round}: {err}");
+        }
+        assert!(catalog.is_file(), "round {round}: catalog is gone");
+        let id = line(&sql(
+            home,
+            &catalog,
+            "SELECT value FROM catalog_meta WHERE key = 'catalog_id'",
+        ));
+        assert!(is_uuid_v7(&id), "round {round}: {id}");
+    }
+}
+
+#[test]
+fn init_force_refuses_a_busy_catalog_and_leaves_it_intact() {
+    let scratch = Scratch::new("force-busy");
+    let home = scratch.path();
+    let catalog = home.join("cat.db");
+    init(home, &catalog);
+    let cat = catalog.to_str().unwrap();
+    let id_query = "SELECT value FROM catalog_meta WHERE key = 'catalog_id'";
+    let id = line(&sql(home, &catalog, id_query));
+
+    let mut other = Connection::open(&catalog).unwrap();
+    let held = other
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let busy = fail(bpm(home, home, &["init", "--force", cat]));
+    assert!(busy.err.contains("catalog is busy"), "{}", busy.err);
+    held.rollback().unwrap();
+    drop(other);
+    assert_eq!(line(&sql(home, &catalog, id_query)), id);
+
+    ok(bpm(home, home, &["init", "--force", cat]));
+    let replaced = line(&sql(home, &catalog, id_query));
+    assert_ne!(replaced, id);
+    assert!(is_uuid_v7(&replaced), "{replaced}");
+    assert_eq!(line(&sql(home, &catalog, "PRAGMA journal_mode")), "wal");
+    assert_eq!(count(home, &catalog, "programs"), 0);
+    #[cfg(unix)]
+    assert_eq!(mode(&catalog), 0o600);
+}
+
+#[test]
+fn init_force_replaces_a_file_that_is_not_a_database() {
+    let scratch = Scratch::new("force-foreign");
+    let home = scratch.path();
+    let catalog = home.join("notes.db");
+    fs::write(&catalog, "not a database\n").unwrap();
+    let cat = catalog.to_str().unwrap();
+
+    let refused = fail(bpm(home, home, &["init", cat]));
+    assert!(refused.err.contains("already exists"), "{}", refused.err);
+    ok(bpm(home, home, &["init", "--force", cat]));
+    let id = line(&sql(
+        home,
+        &catalog,
+        "SELECT value FROM catalog_meta WHERE key = 'catalog_id'",
+    ));
+    assert!(is_uuid_v7(&id), "{id}");
+    let leftovers: Vec<_> = fs::read_dir(home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".init-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn tables_without_a_valid_version_are_corrupt_for_readers_and_writers() {
+    let scratch = Scratch::new("version");
+    let home = scratch.path();
+
+    // A file with BPM's application id and catalog_meta, but no version row.
+    let meta_only = home.join("meta-only.db");
+    {
+        let conn = Connection::open(&meta_only).unwrap();
+        conn.pragma_update(None, "application_id", 0x4250_4D43)
+            .unwrap();
+        conn.execute(
+            "CREATE TABLE catalog_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+    }
+    // A real catalog whose version was set to -1.
+    let negative = home.join("negative.db");
+    init(home, &negative);
+    raw(&negative)
+        .execute(
+            "UPDATE catalog_meta SET value = '-1' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+
+    for catalog in [&meta_only, &negative] {
+        let cat = catalog.to_str().unwrap();
+        for args in [
+            vec!["--catalog", cat, "query", "entities"],
+            vec!["--catalog", cat, "create", "program", "--name", "CLL"],
+        ] {
+            let refused = fail(bpm(home, home, &args));
+            assert!(
+                refused.err.contains("no valid schema_version"),
+                "{args:?}: {}",
+                refused.err
+            );
+            assert!(!refused.err.contains("CREATE TABLE"), "{}", refused.err);
+        }
+    }
+}
+
+#[test]
+fn an_orphan_entity_is_reported_and_repaired_instead_of_panicking() {
+    let scratch = Scratch::new("orphan");
+    let home = scratch.path();
+    let catalog = home.join("cat.db");
+    init(home, &catalog);
+    let cat = catalog.to_str().unwrap();
+    ok(bpm(
+        home,
+        home,
+        &["--catalog", cat, "create", "program", "--name", "CLL"],
+    ));
+
+    // A project whose program does not exist, with a case, metadata, and a link
+    // under it, written with foreign keys off.
+    let project = "11111111-1111-7111-8111-111111111111";
+    let case = "22222222-2222-7222-8222-222222222222";
+    let file = "33333333-3333-7333-8333-333333333333";
+    raw(&catalog)
+        .execute_batch(&format!(
+            "INSERT INTO projects VALUES ('{project}', 'no-such-program', 'Lost', 't', 't');
+             INSERT INTO cases VALUES ('{case}', '{project}', 't', 't');
+             INSERT INTO entity_metadata VALUES ('case', '{case}', 'subject_id', 'X', 't');
+             INSERT INTO files (id, created_at) VALUES ('{file}', 't');
+             INSERT INTO file_links VALUES ('{file}', 'case', '{case}', 'data');
+             INSERT INTO entity_metadata VALUES ('sample', 'no-such-sample', 'k', 'v', 't');"
+        ))
+        .unwrap();
+
+    let refused = bpm(home, home, &["--catalog", cat, "query", "entities"]);
+    assert_eq!(refused.code, 1, "{}", refused.err);
+    assert!(refused.err.contains("inconsistent"), "{}", refused.err);
+    assert!(refused.err.contains("bpm repair"), "{}", refused.err);
+
+    let report = fail(bpm(home, home, &["--catalog", cat, "repair"]));
+    assert!(report.out.contains(project), "{}", report.out);
+    assert!(report.out.contains("no-such-sample"), "{}", report.out);
+    assert!(report.err.contains("repair --apply"), "{}", report.err);
+    assert_eq!(count(home, &catalog, "projects"), 1);
+
+    let repaired = ok(bpm(home, home, &["--catalog", cat, "repair", "--apply"]));
+    assert!(repaired.out.contains("1 descendant"), "{}", repaired.out);
+    assert_eq!(count(home, &catalog, "projects"), 0);
+    assert_eq!(count(home, &catalog, "cases"), 0);
+    assert_eq!(count(home, &catalog, "entity_metadata"), 0);
+    assert_eq!(count(home, &catalog, "file_links"), 0);
+    assert_eq!(count(home, &catalog, "files"), 1);
+    assert_eq!(count(home, &catalog, "programs"), 1);
+
+    let clean = ok(bpm(home, home, &["--catalog", cat, "repair"]));
+    assert!(clean.out.contains("consistent"), "{}", clean.out);
+    let listed = ok(bpm(home, home, &["--catalog", cat, "query", "entities"]));
+    assert!(listed.out.contains("/CLL"), "{}", listed.out);
+}
+
+#[test]
+fn an_orphan_can_be_reparented_instead_of_removed() {
+    let scratch = Scratch::new("orphan-reparent");
+    let home = scratch.path();
+    let catalog = home.join("cat.db");
+    init(home, &catalog);
+    let cat = catalog.to_str().unwrap();
+    ok(bpm(
+        home,
+        home,
+        &["--catalog", cat, "create", "program", "--name", "CLL"],
+    ));
+    let project = "11111111-1111-7111-8111-111111111111";
+    raw(&catalog)
+        .execute(
+            &format!(
+                "INSERT INTO projects VALUES ('{project}', '44444444-4444-7444-8444-444444444444', 'Lost', 't', 't')"
+            ),
+            [],
+        )
+        .unwrap();
+
+    ok(bpm(
+        home,
+        home,
+        &["--catalog", cat, "reparent", project, "/CLL"],
+    ));
+    let listed = ok(bpm(home, home, &["--catalog", cat, "query", "entities"]));
+    assert!(listed.out.contains("/CLL/Lost"), "{}", listed.out);
+    ok(bpm(home, home, &["--catalog", cat, "repair"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shared_bpm_directory_is_warned_about_but_not_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("bpm-mode");
+    let home = scratch.path();
+    let dir = home.join(".bpm");
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let created = ok(bpm(home, home, &["init"]));
+    assert!(created.err.contains("warning"), "{}", created.err);
+    assert!(created.err.contains("chmod 700"), "{}", created.err);
+    let listed = ok(bpm(home, home, &["query", "entities"]));
+    assert!(listed.err.contains("warning"), "{}", listed.err);
+
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let quiet = ok(bpm(home, home, &["query", "entities"]));
+    assert!(!quiet.err.contains("warning"), "{}", quiet.err);
 }

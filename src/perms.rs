@@ -37,3 +37,18 @@ pub fn set_user_dir(path: &Path) -> std::io::Result<()> {
     let _ = path;
     Ok(())
 }
+
+/// The permission bits of `path` when group or other users have any access to
+/// it, or `None` when they have none or `path` does not exist.
+pub fn shared_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path).ok()?.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Some(mode);
+        }
+    }
+    let _ = path;
+    None
+}

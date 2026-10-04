@@ -60,7 +60,7 @@ Filesystem locations are the first implementation milestone. Remote object store
 
 A catalog is one database file.
 
-`bpm init PATH` creates a catalog at `PATH`. `bpm init` with no path creates `~/.bpm/default.db`. Creating a catalog that already exists fails unless the operator passes `--force`, which replaces the catalog file. The catalog file is created so that only the current user can read and write it, and `~/.bpm` is created the same way.
+`bpm init PATH` creates a catalog at `PATH`. `bpm init` with no path creates `~/.bpm/default.db`. Creating a catalog that already exists fails unless the operator passes `--force`, which replaces the catalog file. Replacing refuses a catalog that another process is writing, and a replacement that fails leaves the old catalog as it was. The catalog file is created so that only the current user can read and write it, and `~/.bpm` is created the same way. A command run while `~/.bpm` is readable by other users prints a warning and still runs.
 
 Each catalog has its own id, assigned at init. Copying the file copies the id. Two catalogs never share rows.
 
@@ -75,6 +75,12 @@ Resolution order for every command that uses a catalog:
 The catalog stores metadata and pointers. It does not store file payloads. The only local state outside the catalog file is the small user config under `~/.bpm` (named catalogs, and later login material). That file does not select a catalog. There is no current-catalog setting.
 
 Anyone who can read the catalog file can read every identifier and path in it, including participant ids. Core's protection is the file mode. Operators who need access control use Govern, and in that deployment only the service account can open the catalog files.
+
+#### Integrity
+
+`bpm` keeps the catalog consistent: every entity's parent exists, and every metadata row, link, location, and digest names an entity or file that exists. Another program writing the catalog file directly can break that. Before a command that walks or extends the entity tree, `bpm` checks that every entity's parent exists. If one does not, the command fails and tells the operator to run `bpm repair`.
+
+`bpm repair` lists every row that breaks the catalog's integrity and exits non-zero when it finds any. `bpm repair --apply` removes those rows in one step. An entity whose parent is missing is removed with its descendants, their metadata, and their file links, as `bpm delete --cascade` would. File rows stay. An operator who would rather keep such an entity can move it with `bpm reparent`, or remove it with `bpm delete`, before applying the repair. Those two commands, and `bpm sql`, work on a catalog that fails the check. The [repair guide](../guide/repair.md) walks an operator through the choices.
 
 ### 4.2 Entity tree
 
@@ -347,6 +353,7 @@ The token typed into `bpm serve` is not `bpm login`. `bpm login` is the future c
 | `bpm link` / `bpm unlink` | Attach or detach a file and an entity. The role is an open string | |
 | `bpm acknowledge` | Accept drifted bytes as a new generation | |
 | `bpm sql` | Local SQL, read-only unless `--write` | |
+| `bpm repair` | List rows that break the catalog's integrity. `--apply` removes them | |
 | `bpm serve` | Web UI. Default `127.0.0.1:3000`. `--host` / `BPM_HOST`, `--port` / `BPM_PORT`, `--token` / `BPM_TOKEN`. Token required when the host is set. v1 is read-only | |
 | `bpm query` | Structured query. Flags are a sketch (§4.8) | * |
 | `bpm import` | TSV or JSON ingest (§4.9) | * |
@@ -423,6 +430,7 @@ Scenarios below describe Core behavior. A scenario marked deferred or unstable b
 29. **Web.** `bpm serve` answers on `127.0.0.1:3000`. `BPM_PORT` and `--port` change the port. The tree and a file's drift state match the CLI against the same catalog. The page does not offer a write. `bpm serve --host 0.0.0.0` without a token exits with an error. With `BPM_TOKEN` or `--token` set, the catalog is shown only after the operator enters that token. The process does not listen on a non-loopback address unless `--host` or `BPM_HOST` asks it to.
 30. **Two catalogs.** Entities created in catalog A are invisible to queries against catalog B.
 31. **Benchmark.** A synthetic catalog of 1,000,000 files and 5,000,000 metadata entries runs `files --under` a Project and `entities --where` a metadata key. The harness records elapsed time. The target is interactive response, a few seconds, on one workstation.
+32. **Repair.** A Project whose Program row was removed outside `bpm` makes `bpm query entities` fail with a message that names `bpm repair`, not a crash. `bpm repair` lists that Project and exits non-zero. `bpm repair --apply` removes it with its Cases and their metadata and links, keeps the file rows, and a second `bpm repair` reports the catalog consistent. `bpm reparent` can instead move the Project under an existing Program.
 
 ### 4.16 Core release slices
 
@@ -430,7 +438,7 @@ The scenarios in §4.15 that are not marked deferred or unstable are the contrac
 
 | Slice | Contents |
 | --- | --- |
-| A | Catalogs, entity tree, metadata, query, SQL hatch |
+| A | Catalogs, entity tree, metadata, query, SQL hatch, repair |
 | B | Ingest, scan, fingerprint, locations, drift, acknowledge, link |
 | C | Import, manifests, materialize. Derived-from edges, impact, lineage, and command history are a later milestone (§4.7) |
 | D | Read-only web UI (Core v1). Read-write UI is Core v2 and is TBD |

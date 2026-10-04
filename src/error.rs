@@ -58,8 +58,19 @@ pub enum Error {
     #[error("{0} is not a BPM catalog; refusing to open it")]
     NotACatalog(PathBuf),
 
-    #[error("catalog is missing schema_version; refusing to open it")]
+    #[error("catalog has no valid schema_version; refusing to open it")]
     CorruptSchema,
+
+    #[error("migration V{version:03} failed: {message}")]
+    MigrationFailed { version: i64, message: String },
+
+    #[error("catalog is inconsistent: {0}; run `bpm repair` to list the problems")]
+    Inconsistent(String),
+
+    #[error(
+        "{0} row(s) break the catalog's integrity; see the repair guide, or `bpm repair --apply` removes them"
+    )]
+    RepairNeeded(usize),
 
     #[error("file queries are not part of this milestone; they arrive with the file indexer")]
     FileMilestone,

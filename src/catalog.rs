@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Utc;
+use rusqlite::backup::{Backup, StepResult};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior, ffi, params};
 use uuid::Uuid;
@@ -106,26 +107,110 @@ impl Catalog {
     /// Create a catalog at `path`. A file that is already there is left untouched
     /// unless `force` replaces it.
     pub fn init(path: &Path, force: bool) -> Result<(), Error> {
-        if path.exists() && !force {
-            return Err(Error::AlreadyExists(path.to_path_buf()));
-        }
         create_parents(path)?;
-        if path.exists() {
-            ensure_idle(path)?;
-            remove_catalog_files(path);
+        if force && path.exists() {
+            return replace(path);
         }
-        let result = (|| -> Result<(), Error> {
-            perms::create_user_file(path)?;
-            let mut conn = writable(path)?;
-            conn.pragma_update(None, "application_id", migrate::APPLICATION_ID)?;
-            migrate::apply(&mut conn).map_err(|err| busy(err, path))?;
-            insert_identity(&mut conn, path)?;
-            Ok(())
-        })();
+        // Exclusive creation is the existence check, so of two overlapping inits
+        // exactly one owns the new file and the other reports that it exists.
+        match perms::create_user_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(Error::AlreadyExists(path.to_path_buf()));
+            }
+            Err(err) => return Err(err.into()),
+        }
+        // The file is this call's own, so a failure removes only what it created.
+        let result = writable(path).and_then(|mut conn| build(&mut conn, path));
         if result.is_err() {
             remove_catalog_files(path);
         }
         result
+    }
+
+    /// Fail with [`Error::Inconsistent`] if any entity's parent is missing.
+    /// This is `PRAGMA foreign_key_check` on the node tables only, which is what
+    /// every tree walk depends on. The tree is small next to the file tables, so
+    /// it is cheap enough to run before each command. `bpm repair` checks
+    /// everything.
+    pub fn check_tree(&self) -> Result<(), Error> {
+        let sql = format!(
+            "SELECT {}",
+            NODE_PARENTS
+                .iter()
+                .map(|(table, _, _)| {
+                    format!("(SELECT COUNT(*) FROM pragma_foreign_key_check('{table}'))")
+                })
+                .collect::<Vec<_>>()
+                .join(" + ")
+        );
+        let orphans: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
+        if orphans > 0 {
+            let entities = if orphans == 1 {
+                "entity has"
+            } else {
+                "entities have"
+            };
+            return Err(Error::Inconsistent(format!(
+                "{orphans} {entities} no parent"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Every row that breaks a declared foreign key or a `(node_type, node_id)`
+    /// reference. Does not write.
+    pub fn problems(&mut self) -> Result<Vec<Problem>, Error> {
+        let snapshot = self.conn.transaction()?;
+        find_problems(&snapshot)
+    }
+
+    /// Remove every row [`Catalog::problems`] reports, in one write transaction.
+    /// An entity whose parent is missing goes with its subtree, metadata, and
+    /// links, the way `delete --cascade` would remove it. File rows are kept.
+    /// Returns what was found and how many descendants went with it.
+    pub fn repair(&mut self) -> Result<(Vec<Problem>, usize), Error> {
+        self.require_write()?;
+        let tx = begin(&mut self.conn, &self.path)?;
+        let found = find_problems(&tx)?;
+        if found.is_empty() {
+            return Ok((found, 0));
+        }
+        let index = load_index(&tx)?;
+        let mut doomed = Vec::new();
+        let mut seen = HashSet::new();
+        for problem in found.iter().filter(|problem| is_node_table(problem.table)) {
+            for key in &problem.keys {
+                let id = Uuid::parse_str(key)
+                    .map_err(|err| Error::Message(format!("invalid entity id {key}: {err}")))?;
+                if seen.insert(id) {
+                    doomed.push(id);
+                }
+            }
+        }
+        let orphans = doomed.len();
+        for id in doomed.clone() {
+            collect_descendants_seen(id, &index, &mut doomed, &mut seen);
+        }
+        let descendants = doomed.len() - orphans;
+        delete_ids(&tx, &doomed)?;
+        for check in checks().iter().filter(|check| !is_node_table(check.table)) {
+            tx.execute(
+                &format!("DELETE FROM {} WHERE {}", check.table, check.predicate),
+                [],
+            )?;
+        }
+        let left: i64 =
+            tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        if left > 0 || !find_problems(&tx)?.is_empty() {
+            return Err(Error::Message(
+                "repair did not remove every problem; the catalog is unchanged".into(),
+            ));
+        }
+        tx.commit()?;
+        Ok((found, descendants))
     }
 
     pub fn create(
@@ -352,19 +437,19 @@ impl Catalog {
         if let Some(node_type) = query.node_type {
             ids.retain(|id| index.get(*id).node_type == node_type);
         }
-        let mut rows: Vec<EntityRow> = ids
+        let mut rows = ids
             .into_iter()
             .map(|id| {
                 let node = index.get(id);
-                EntityRow {
+                Ok(EntityRow {
                     node_type: node.node_type,
                     id: node.id,
-                    path: path_of(node, &index),
+                    path: path_of(node, &index)?,
                     name: node.name.clone(),
                     metadata: node.metadata.clone(),
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, Error>>()?;
         rows.sort_by(|a, b| {
             a.node_type
                 .rank()
@@ -443,11 +528,12 @@ fn readonly(path: &Path) -> Result<Connection, Error> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(BUSY_WAIT)?;
+    conn.pragma_update(None, "foreign_keys", true)?;
     Ok(conn)
 }
 
-/// Open an existing file for write. Foreign keys are off by default in every
-/// new SQLite connection, so this turns them on.
+/// Open an existing file for write. Whether foreign keys are enforced by
+/// default depends on how SQLite was built, so every connection turns them on.
 fn writable(path: &Path) -> Result<Connection, Error> {
     let conn = Connection::open_with_flags(
         path,
@@ -477,10 +563,10 @@ fn begin<'a>(conn: &'a mut Connection, path: &Path) -> Result<Transaction<'a>, E
 /// Report SQLite's busy and locked errors as the typed busy error.
 fn busy(err: Error, path: &Path) -> Error {
     match &err {
-        Error::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
+        Error::Sqlite(inner)
             if matches!(
-                failure.code,
-                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+                inner.sqlite_error_code(),
+                Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
             ) =>
         {
             Error::Busy(path.to_path_buf())
@@ -489,20 +575,70 @@ fn busy(err: Error, path: &Path) -> Error {
     }
 }
 
-/// `init --force` replaces a catalog only while no other process is writing it.
-fn ensure_idle(path: &Path) -> Result<(), Error> {
-    let Ok(mut conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE) else {
-        return Ok(());
-    };
-    conn.busy_timeout(BUSY_WAIT)?;
-    match begin(&mut conn, path) {
-        Ok(tx) => {
-            tx.rollback()?;
-            Ok(())
-        }
-        Err(Error::Busy(path)) => Err(Error::Busy(path)),
-        // Not a SQLite database: --force replaces it anyway.
-        Err(_) => Ok(()),
+/// Stamp an empty database as a BPM catalog: the application id, every
+/// migration, and the catalog's identity.
+fn build(conn: &mut Connection, path: &Path) -> Result<(), Error> {
+    conn.pragma_update(None, "application_id", migrate::APPLICATION_ID)?;
+    migrate::apply(conn).map_err(|err| busy(err, path))?;
+    insert_identity(conn, path)
+}
+
+/// `init --force` over an existing file. The new catalog is built in memory and
+/// copied over the old one by SQLite's backup API in a single write
+/// transaction. A catalog another process is writing is refused as busy, no
+/// writer can commit into a file that is about to be replaced, and any failure
+/// leaves the old catalog as it was.
+fn replace(path: &Path) -> Result<(), Error> {
+    let mut fresh = Connection::open_in_memory()?;
+    build(&mut fresh, path)?;
+    let mut target = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    target.busy_timeout(BUSY_WAIT)?;
+    if let Err(err) = copy_into(&fresh, &mut target, path) {
+        drop(target);
+        return match err {
+            Error::Sqlite(inner) if inner.sqlite_error_code() == Some(ErrorCode::NotADatabase) => {
+                replace_foreign(path, &fresh)
+            }
+            other => Err(other),
+        };
+    }
+    drop(target);
+    perms::set_user_file(path)?;
+    // Reopening for write confirms the replaced catalog is in WAL mode.
+    writable(path)?;
+    Ok(())
+}
+
+/// `init --force` over a file that is not a SQLite database. No SQLite process
+/// can be using it, so the catalog is built beside it and renamed over it.
+fn replace_foreign(path: &Path, fresh: &Connection) -> Result<(), Error> {
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".init-{}", Uuid::now_v7()));
+    let staged = PathBuf::from(name);
+    let result = (|| -> Result<(), Error> {
+        perms::create_user_file(&staged)?;
+        let mut conn = writable(&staged)?;
+        copy_into(fresh, &mut conn, &staged)?;
+        drop(conn);
+        remove_sidecars(path);
+        fs::rename(&staged, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        remove_catalog_files(&staged);
+    }
+    result
+}
+
+fn copy_into(from: &Connection, to: &mut Connection, path: &Path) -> Result<(), Error> {
+    let backup = Backup::new(from, to)?;
+    match backup.step(-1)? {
+        StepResult::Done => Ok(()),
+        StepResult::Busy | StepResult::Locked => Err(Error::Busy(path.to_path_buf())),
+        _ => Err(Error::Message("catalog copy did not finish".into())),
     }
 }
 
@@ -526,6 +662,10 @@ fn create_parents(path: &Path) -> Result<(), Error> {
 
 fn remove_catalog_files(path: &Path) {
     let _ = fs::remove_file(path);
+    remove_sidecars(path);
+}
+
+fn remove_sidecars(path: &Path) {
     for suffix in ["-wal", "-shm", "-journal"] {
         let mut sibling = path.as_os_str().to_owned();
         sibling.push(suffix);
@@ -702,6 +842,127 @@ fn delete_ids(conn: &Connection, ids: &[Uuid]) -> Result<(), Error> {
     Ok(())
 }
 
+/// Node tables with a parent: (table, parent column, parent table).
+const NODE_PARENTS: [(&str, &str, &str); 5] = [
+    ("projects", "program_id", "programs"),
+    ("cases", "project_id", "projects"),
+    ("samples", "case_id", "cases"),
+    ("raw_data", "sample_id", "samples"),
+    ("analyses", "raw_data_id", "raw_data"),
+];
+
+/// Rows in one table that break the catalog's integrity.
+pub struct Problem {
+    pub table: &'static str,
+    pub issue: &'static str,
+    /// The rows, by their key. For a node table the key is the entity UUID.
+    pub keys: Vec<String>,
+}
+
+struct Check {
+    table: &'static str,
+    issue: &'static str,
+    key: &'static str,
+    predicate: String,
+}
+
+/// Every integrity rule, in repair order: entities first (removing an orphan
+/// subtree also removes its metadata and links), then rows that name a missing
+/// entity, file, or run. The node and file rules are the declared foreign
+/// keys. `(node_type, node_id)` is not a foreign key, so it is checked here.
+fn checks() -> Vec<Check> {
+    let mut checks: Vec<Check> = NODE_PARENTS
+        .iter()
+        .map(|(table, column, parent)| Check {
+            table,
+            issue: "parent entity is missing",
+            key: "id",
+            predicate: format!(
+                "NOT EXISTS (SELECT 1 FROM {parent} WHERE {parent}.id = {table}.{column})"
+            ),
+        })
+        .collect();
+    for (table, key) in [
+        (
+            "entity_metadata",
+            "node_type || ' ' || node_id || ' ' || key",
+        ),
+        (
+            "file_links",
+            "file_id || ' ' || node_type || ' ' || node_id",
+        ),
+    ] {
+        checks.push(Check {
+            table,
+            issue: "entity is missing",
+            key,
+            predicate: format!(
+                "NOT EXISTS (SELECT 1 FROM entities WHERE entities.node_type = {table}.node_type AND entities.id = {table}.node_id)"
+            ),
+        });
+    }
+    for (table, key) in [
+        ("file_metadata", "file_id || ' ' || key"),
+        (
+            "file_digests",
+            "file_id || ' ' || algorithm || ' ' || generation",
+        ),
+        ("file_locations", "backend || ':' || uri"),
+        (
+            "file_links",
+            "file_id || ' ' || node_type || ' ' || node_id",
+        ),
+    ] {
+        checks.push(Check {
+            table,
+            issue: "file is missing",
+            key,
+            predicate: format!("NOT EXISTS (SELECT 1 FROM files WHERE files.id = {table}.file_id)"),
+        });
+    }
+    for (table, runs) in [
+        ("ingest_errors", "ingest_runs"),
+        ("scan_errors", "scan_runs"),
+    ] {
+        checks.push(Check {
+            table,
+            issue: "run is missing",
+            key: "run_id || ' ' || uri",
+            predicate: format!(
+                "NOT EXISTS (SELECT 1 FROM {runs} WHERE {runs}.id = {table}.run_id)"
+            ),
+        });
+    }
+    checks
+}
+
+fn is_node_table(table: &str) -> bool {
+    NODE_PARENTS
+        .iter()
+        .any(|(node_table, _, _)| *node_table == table)
+}
+
+fn find_problems(conn: &Connection) -> Result<Vec<Problem>, Error> {
+    let mut found = Vec::new();
+    for check in checks() {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM {} WHERE {} ORDER BY 1",
+            check.key, check.table, check.predicate
+        ))?;
+        let keys = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !keys.is_empty() {
+            found.push(Problem {
+                table: check.table,
+                issue: check.issue,
+                keys,
+            });
+        }
+    }
+    Ok(found)
+}
+
 fn load_index(conn: &Connection) -> Result<Index, Error> {
     let mut nodes = Vec::new();
     {
@@ -720,13 +981,10 @@ fn load_index(conn: &Connection) -> Result<Index, Error> {
                 .ok_or_else(|| Error::Message(format!("unknown node type {node_type}")))?;
             let id = Uuid::parse_str(&id)
                 .map_err(|err| Error::Message(format!("invalid entity id {id}: {err}")))?;
-            let parent_id =
-                match parent_id {
-                    Some(value) => Some(Uuid::parse_str(&value).map_err(|err| {
-                        Error::Message(format!("invalid parent id {value}: {err}"))
-                    })?),
-                    None => None,
-                };
+            // A parent id that is not a UUID cannot name an entity, so it is a
+            // missing parent like any other: the startup check and `bpm repair`
+            // report it, and `reparent` or `delete` can still reach the entity.
+            let parent_id = parent_id.and_then(|value| Uuid::parse_str(&value).ok());
             nodes.push(NodeRec {
                 node_type,
                 id,
@@ -776,8 +1034,14 @@ fn load_index(conn: &Connection) -> Result<Index, Error> {
 }
 
 impl Index {
+    /// For ids taken from this index. An id from a row's parent column may be
+    /// missing in an inconsistent catalog; use [`Index::lookup`] for those.
     fn get(&self, id: Uuid) -> &NodeRec {
         &self.nodes[self.by_id[&id]]
+    }
+
+    fn lookup(&self, id: Uuid) -> Option<&NodeRec> {
+        self.by_id.get(&id).map(|position| &self.nodes[*position])
     }
 }
 
@@ -872,19 +1136,25 @@ fn collect_descendants_seen(
     }
 }
 
-fn path_of(node: &NodeRec, index: &Index) -> Option<String> {
-    match node.node_type {
-        NodeType::Program => Some(format!("/{}", node.name.as_deref()?)),
+/// A Program's or Project's path. A Project whose Program is missing is an
+/// inconsistent catalog, reported as an error rather than a panic.
+fn path_of(node: &NodeRec, index: &Index) -> Result<Option<String>, Error> {
+    Ok(match node.node_type {
+        NodeType::Program => node.name.as_ref().map(|name| format!("/{name}")),
         NodeType::Project => {
-            let parent = index.get(node.parent_id?);
-            Some(format!(
-                "/{}/{}",
-                parent.name.as_deref()?,
-                node.name.as_deref()?
-            ))
+            let program = node
+                .parent_id
+                .and_then(|id| index.lookup(id))
+                .ok_or_else(|| {
+                    Error::Inconsistent(format!("project {} has no parent program", node.id))
+                })?;
+            match (&program.name, &node.name) {
+                (Some(program), Some(project)) => Some(format!("/{program}/{project}")),
+                _ => None,
+            }
         }
         _ => None,
-    }
+    })
 }
 
 fn map_write(err: rusqlite::Error) -> Error {
