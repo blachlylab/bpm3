@@ -927,7 +927,7 @@ fn path_filters_apply_to_ingest_and_scan() {
     fs::create_dir_all(env.home().join(".bpm")).unwrap();
     fs::write(
         env.home().join(".bpm/config.toml"),
-        "denylist = [\"*.txt\", \"scratch/**\"]\n",
+        "blacklist = [\"*.txt\", \"scratch/**\"]\n",
     )
     .unwrap();
 
@@ -962,8 +962,8 @@ fn path_filters_apply_to_ingest_and_scan() {
     env.ingest(&run42);
     assert_eq!(uris(&env), ["S1.fq.gz", "keep/scratch/x.fq.gz", "old.bak"]);
 
-    // --denylist replaces the global list for one run; built-ins still apply.
-    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--denylist", "*.bak"]));
+    // --blacklist replaces the global list for one run; built-ins still apply.
+    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--blacklist", "*.bak"]));
     assert_eq!(
         uris(&env),
         [
@@ -974,7 +974,7 @@ fn path_filters_apply_to_ingest_and_scan() {
             "scratch/tmp.fq.gz"
         ]
     );
-    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--no-default-denylist"]));
+    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--no-default-blacklist"]));
     assert_eq!(uris(&env).len(), 7);
 
     // Scan applies the same filters to the locations it checks.
@@ -985,7 +985,7 @@ fn path_filters_apply_to_ingest_and_scan() {
 
     fs::write(
         env.home().join(".bpm/config.toml"),
-        "denylist = \"*.txt\"\n",
+        "blacklist = \"*.txt\"\n",
     )
     .unwrap();
     let bad = fail(env.bpm(&["ingest", run42.to_str().unwrap()]));
@@ -1069,7 +1069,7 @@ fn symlinks_follow_the_walk_rules() {
     write(&hidden.join("notes.txt"), b"notes\n");
     symlink(filtered.join(".DS_Store"), filtered.join("innocent.fq")).unwrap();
     symlink(hidden.join("notes.txt"), filtered.join("also.fq")).unwrap();
-    let run = ok(env.bpm(&["ingest", filtered.to_str().unwrap(), "--denylist", "*.txt"]));
+    let run = ok(env.bpm(&["ingest", filtered.to_str().unwrap(), "--blacklist", "*.txt"]));
     assert!(run.out.contains("0 files seen"), "{}", run.out);
 }
 

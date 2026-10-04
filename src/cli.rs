@@ -154,12 +154,12 @@ enum Command {
 
 #[derive(clap::Args)]
 struct FilterArgs {
-    /// Comma-separated globs that replace the denylist in ~/.bpm/config.toml for this run.
+    /// Comma-separated globs that replace the blacklist in ~/.bpm/config.toml for this run.
     #[arg(long, value_name = "PATTERNS")]
-    denylist: Vec<String>,
+    blacklist: Vec<String>,
     /// Do not skip the built-in names (.DS_Store, Thumbs.db).
     #[arg(long)]
-    no_default_denylist: bool,
+    no_default_blacklist: bool,
     /// Comma-separated globs. When set, only matching paths are considered.
     #[arg(long, value_name = "PATTERNS")]
     whitelist: Vec<String>,
@@ -168,13 +168,13 @@ struct FilterArgs {
 impl FilterArgs {
     fn build(&self) -> Result<PathFilter, Error> {
         let spec = FilterSpec {
-            denylist: (!self.denylist.is_empty()).then(|| {
-                self.denylist
+            blacklist: (!self.blacklist.is_empty()).then(|| {
+                self.blacklist
                     .iter()
                     .flat_map(|raw| filter::split_patterns(raw))
                     .collect()
             }),
-            no_default_denylist: self.no_default_denylist,
+            no_default_blacklist: self.no_default_blacklist,
             whitelist: self
                 .whitelist
                 .iter()
@@ -182,8 +182,8 @@ impl FilterArgs {
                 .collect(),
         };
         // With no HOME there is no config file, which is an empty global list.
-        let global = match (&spec.denylist, catalog::home_dir()) {
-            (None, Ok(home)) => filter::global_denylist(&home)?,
+        let global = match (&spec.blacklist, catalog::home_dir()) {
+            (None, Ok(home)) => filter::global_blacklist(&home)?,
             _ => Vec::new(),
         };
         PathFilter::new(&spec, global)

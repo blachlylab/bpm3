@@ -1,4 +1,4 @@
-//! The denylist and the glob whitelist (architecture overview §6, Path filters).
+//! The blacklist and the glob whitelist (architecture overview §6, Path filters).
 
 use std::fs;
 use std::path::Path;
@@ -7,15 +7,15 @@ use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::error::Error;
 
-/// Names skipped at any depth unless a run passes `--no-default-denylist`.
+/// Names skipped at any depth unless a run passes `--no-default-blacklist`.
 pub const BUILT_IN: [&str; 2] = [".DS_Store", "Thumbs.db"];
 
 /// What one run asked for on the command line.
 #[derive(Debug, Default, Clone)]
 pub struct FilterSpec {
-    /// `--denylist`: replaces the global list for this run.
-    pub denylist: Option<Vec<String>>,
-    pub no_default_denylist: bool,
+    /// `--blacklist`: replaces the global list for this run.
+    pub blacklist: Option<Vec<String>>,
+    pub no_default_blacklist: bool,
     pub whitelist: Vec<String>,
 }
 
@@ -28,10 +28,10 @@ pub fn split_patterns(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// The global denylist from `~/.bpm/config.toml`. A missing file is an empty
-/// list. A file that is not valid TOML, or a `denylist` that is not an array of
+/// The global blacklist from `~/.bpm/config.toml`. A missing file is an empty
+/// list. A file that is not valid TOML, or a `blacklist` that is not an array of
 /// strings, is an error rather than a silently ignored setting.
-pub fn global_denylist(home: &Path) -> Result<Vec<String>, Error> {
+pub fn global_blacklist(home: &Path) -> Result<Vec<String>, Error> {
     let path = home.join(".bpm").join("config.toml");
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -41,12 +41,12 @@ pub fn global_denylist(home: &Path) -> Result<Vec<String>, Error> {
     let table: toml::Table = text
         .parse()
         .map_err(|err| Error::Message(format!("{}: {err}", path.display())))?;
-    let Some(value) = table.get("denylist") else {
+    let Some(value) = table.get("blacklist") else {
         return Ok(Vec::new());
     };
     let invalid = || {
         Error::Message(format!(
-            "{}: denylist must be an array of strings",
+            "{}: blacklist must be an array of strings",
             path.display()
         ))
     };
@@ -94,18 +94,18 @@ impl Patterns {
 }
 
 pub struct PathFilter {
-    deny: Patterns,
+    blacklist: Patterns,
     allow: Patterns,
 }
 
 impl PathFilter {
     pub fn new(spec: &FilterSpec, global: Vec<String>) -> Result<Self, Error> {
-        let mut deny: Vec<String> = spec.denylist.clone().unwrap_or(global);
-        if !spec.no_default_denylist {
-            deny.extend(BUILT_IN.iter().map(|name| name.to_string()));
+        let mut blacklist: Vec<String> = spec.blacklist.clone().unwrap_or(global);
+        if !spec.no_default_blacklist {
+            blacklist.extend(BUILT_IN.iter().map(|name| name.to_string()));
         }
         Ok(Self {
-            deny: Patterns::new(deny.iter().map(String::as_str))?,
+            blacklist: Patterns::new(blacklist.iter().map(String::as_str))?,
             allow: Patterns::new(spec.whitelist.iter().map(String::as_str))?,
         })
     }
@@ -114,7 +114,7 @@ impl PathFilter {
     /// relative to the walk or scan root, or is the full URI for a scan of a
     /// whole backend.
     pub fn allows(&self, rel: &str) -> bool {
-        if self.deny.matches(rel) {
+        if self.blacklist.matches(rel) {
             return false;
         }
         self.allow.empty || self.allow.matches(rel)
@@ -137,15 +137,15 @@ mod tests {
     use super::*;
 
     fn filter(
-        deny: Option<&[&str]>,
+        blacklist: Option<&[&str]>,
         global: &[&str],
         no_default: bool,
         allow: &[&str],
     ) -> PathFilter {
         PathFilter::new(
             &FilterSpec {
-                denylist: deny.map(|list| list.iter().map(|p| p.to_string()).collect()),
-                no_default_denylist: no_default,
+                blacklist: blacklist.map(|list| list.iter().map(|p| p.to_string()).collect()),
+                no_default_blacklist: no_default,
                 whitelist: allow.iter().map(|p| p.to_string()).collect(),
             },
             global.iter().map(|p| p.to_string()).collect(),
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_denylist_replaces_the_global_one_but_keeps_built_ins() {
+    fn a_run_blacklist_replaces_the_global_one_but_keeps_built_ins() {
         let global = filter(None, &["*.txt", "scratch/**"], false, &[]);
         assert!(!global.allows("notes.txt"));
         assert!(!global.allows("deep/notes.txt"));

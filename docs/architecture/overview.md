@@ -119,7 +119,7 @@ Catalog files and `~/.bpm` are created with mode `0600` for files and `0700` for
 
 `~/.bpm/context.toml` may record named catalogs. It has no `current` key, and a command never opens a catalog because the file names it. Resolution stays `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.db`. Walk filters do not live in this file.
 
-`~/.bpm/config.toml` holds global tool settings. Today that is the denylist, described in §6. A command reads it for those settings. It does not select a catalog.
+`~/.bpm/config.toml` holds global tool settings. Today that is the blacklist, described in §6. A command reads it for those settings. It does not select a catalog.
 
 A remote catalog entry, and `bpm use`, belong to Govern and are **UNSTABLE / TBD** (PRD §5 and the `*` rows in PRD §4.13). The `bpm serve` token is `--token` or `BPM_TOKEN`. It is not written into either file. `context.toml` may look like this:
 
@@ -373,28 +373,28 @@ Drift against a trusted checksum compares what the backend returns now with the 
 
 ### Path filters
 
-The denylist and the whitelist apply to the ingest walk and to which existing locations a scan checks. They do not delete a catalog row that a later filter would have skipped.
+The blacklist and the whitelist apply to the ingest walk and to which existing locations a scan checks. They do not delete a catalog row that a later filter would have skipped.
 
-The built-in denylist is the file names `.DS_Store` and `Thumbs.db`. It always applies, unless this run passes `--no-default-denylist`.
+The built-in blacklist is the file names `.DS_Store` and `Thumbs.db`. It always applies, unless this run passes `--no-default-blacklist`.
 
 Further patterns are globs. A pattern with no `/` matches the final path component, so `*.txt` skips that name at any depth. A pattern containing `/` is matched against the path relative to the walk root, or against the scan path as the whitelist is, and uses the same `*` and `**` rules.
 
 `~/.bpm/config.toml` may set a global list:
 
 ```toml
-denylist = ["*.txt", "scratch/**"]
+blacklist = ["*.txt", "scratch/**"]
 ```
 
-`--denylist '*.txt,*.bak'` replaces that global list for one run. The patterns are comma-separated. A pattern that itself contains a comma is written in the toml, as one string in the array. Passing `--denylist` does not drop the built-in names. `--no-default-denylist` does. There is no per-catalog denylist and no denylist file discovered by walking up from the data.
+`--blacklist '*.txt,*.bak'` replaces that global list for one run. The patterns are comma-separated. A pattern that itself contains a comma is written in the toml, as one string in the array. Passing `--blacklist` does not drop the built-in names. `--no-default-blacklist` does. There is no per-catalog blacklist and no blacklist file discovered by walking up from the data.
 
-The whitelist is zero or more glob patterns, passed as `--whitelist '*.fq.gz,*.bam'`. Both flags may be repeated, and their comma-separated lists are joined. `--denylist ''` empties the global list for one run. With none set, every path that survives the denylist is eligible. With one or more set, a path must match at least one pattern and must not be denied. `*` does not cross `/`. `**` does. On ingest the pattern is matched against the path relative to the walk root. On scan it is matched against the location path relative to the scan root, or against the full URI when the scan covers a whole backend.
+The whitelist is zero or more glob patterns, passed as `--whitelist '*.fq.gz,*.bam'`. Both flags may be repeated, and their comma-separated lists are joined. `--blacklist ''` empties the global list for one run. With none set, every path that survives the blacklist is eligible. With one or more set, a path must match at least one pattern and must not be denied. `*` does not cross `/`. `**` does. On ingest the pattern is matched against the path relative to the walk root. On scan it is matched against the location path relative to the scan root, or against the full URI when the scan covers a whole backend.
 
 ### Ingest walk
 
 1. Resolve the pathspec to a canonical directory. Refuse to start if it is not a directory.
 2. Walk depth-first. Skip directory symlinks whose canonical target is outside the root, and record them as ingest errors of class `outside_root` (reported, not fatal). Skip symlink cycles.
 3. Follow a symlink to a regular file. The walked path and the canonical path are two location candidates when they differ. A directory, whether reached directly or through a link, is walked by its canonical path, so every file under it is recorded under the path later commands resolve to.
-4. Apply the denylist and the whitelist. Each candidate is matched by its own path: relative to the root, or by its final name when a link target is outside the root. A link is skipped when its target is denied, even if the link's own name is allowed.
+4. Apply the blacklist and the whitelist. Each candidate is matched by its own path: relative to the root, or by its final name when a link target is outside the root. A link is skipped when its target is denied, even if the link's own name is allowed.
 5. Skip any path whose `(backend, uri)` is already a location. Do not stat it for drift and do not hash it.
 6. For each new regular file on a posix backend, record size, mtime, and fingerprint. If size, scheme, and fingerprint match an existing file, run the duplicate consultation above. On a checksum-bearing object backend, record size and the backend checksums, and skip the body unless the download flag is set.
 7. A path that cannot be read, when a read was required, is an error and receives no fingerprint. It still gets a file row and a location, with the size and mtime stat returned, so a later scan can read it once it is readable. A path that cannot be stat'ed gets no row.
@@ -408,7 +408,7 @@ Within one batch, two new paths with the same size and fingerprint are compared 
 
 ### Scan
 
-Scan does not walk for new files. It selects location rows, applies the denylist and the whitelist, and stats what remains. A posix location is streamed through BLAKE3. A checksum-bearing object location is checked from the checksums the backend returns, and the body is downloaded only when the flag is set.
+Scan does not walk for new files. It selects location rows, applies the blacklist and the whitelist, and stats what remains. A posix location is streamed through BLAKE3. A checksum-bearing object location is checked from the checksums the backend returns, and the body is downloaded only when the flag is set.
 
 A scan argument that is a backend name (`posix`, `s3`) selects that backend. Anything else is a path on the local filesystem, so a directory named `posix` is written `./posix`. A path that no longer exists still selects the locations recorded under it. That is how the old side of a move is scanned. Locations are read a page of 1,000 at a time, in `(backend, uri)` order, and each page is one committed batch.
 
