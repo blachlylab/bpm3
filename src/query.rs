@@ -91,6 +91,20 @@ pub fn render_files(rows: &[FileRow], format: RenderFormat) -> String {
     }
 }
 
+/// `bpm query files --count`. One column, not the file rows.
+pub fn render_count(count: i64, format: RenderFormat) -> String {
+    let row = vec![count.to_string()];
+    match format {
+        RenderFormat::Table => render_table(&["count"], &[row]),
+        RenderFormat::Csv => render_csv(&["count"], &[row]),
+        RenderFormat::Json => format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({ "count": count }))
+                .unwrap_or_else(|_| "{\"count\":0}".into())
+        ),
+    }
+}
+
 /// `bpm query summary`: one `section  name  count  bytes` row per figure.
 pub fn render_summary(summary: &Summary, format: RenderFormat) -> String {
     let mut rows: Vec<Vec<String>> = Vec::new();

@@ -219,6 +219,60 @@ fn snapshot(env: &Env) -> String {
 }
 
 #[test]
+fn query_files_count_respects_the_filters_and_the_format() {
+    let env = Env::new("count");
+    let dir = env.data().join("run");
+    write(&dir.join("a.fq"), b"aaa\n");
+    write(&dir.join("b.fq"), b"bbb\n");
+    write(&dir.join("c.fq"), b"ccc\n");
+    env.ingest(&dir);
+
+    let table = ok(env.bpm(&["query", "files", "--count"]));
+    assert_eq!(table.out, "count\n3\n");
+    let csv = ok(env.bpm(&["query", "files", "-c", "--format", "csv"]));
+    assert_eq!(csv.out, "count\n3\n");
+    let json = ok(env.bpm(&["query", "files", "--count", "--format", "json"]));
+    assert_eq!(
+        serde_json::from_str::<Value>(&json.out).unwrap()["count"],
+        3
+    );
+
+    assert_eq!(
+        ok(env.bpm(&["query", "files", "--count", "--unlinked"])).out,
+        "count\n3\n"
+    );
+    assert_eq!(
+        ok(env.bpm(&["query", "files", "--count", "--drift", "unverified"])).out,
+        "count\n3\n"
+    );
+    assert_eq!(
+        ok(env.bpm(&["query", "files", "--count", "--drift", "ok"])).out,
+        "count\n0\n"
+    );
+    assert_eq!(
+        ok(env.bpm(&["query", "files", "--count", "--digest", "blake3:ab"])).out,
+        "count\n0\n"
+    );
+
+    let id = env.id_at(&dir.join("a.fq"));
+    env.create(&["program", "--name", "CLL"]);
+    ok(env.bpm(&["link", &id, "/CLL", "--role", "data"]));
+    assert_eq!(
+        ok(env.bpm(&["query", "files", "--count", "--role", "data"])).out,
+        "count\n1\n"
+    );
+    assert_eq!(
+        ok(env.bpm(&["query", "files", "--count", "--under", "/CLL"])).out,
+        "count\n1\n"
+    );
+    assert_eq!(
+        ok(env.bpm(&["query", "files", "--count", "--unlinked"])).out,
+        "count\n2\n"
+    );
+    assert_eq!(env.files(&["--unlinked"]).len(), 2);
+}
+
+#[test]
 fn scenario_10_ingest_creates_unlinked_rows_without_payload() {
     let env = Env::new("s10");
     let run42 = env.data().join("run42");
@@ -1221,6 +1275,32 @@ fn a_config_whitelist_limits_ingest_until_a_flag_replaces_it() {
     let uris = uris(&env);
     assert!(uris.iter().any(|uri| uri == "extra.bam"), "{uris:?}");
     assert!(!uris.iter().any(|uri| uri == "extra.txt"), "{uris:?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_closed_stdout_is_sigpipe_not_a_panic() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Command, Stdio};
+
+    let env = Env::new("sigpipe");
+    // The read end is dropped before the child starts, so the first write to
+    // stdout finds a pipe with no reader.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let child = Command::new(env!("CARGO_BIN_EXE_bpm"))
+        .current_dir(env.home())
+        .env("HOME", env.home())
+        .env_remove("BPM_CATALOG")
+        .args(["--catalog", env.catalog.to_str().unwrap(), "query", "files"])
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bpm");
+    let output = child.wait_with_output().expect("wait");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.signal(), Some(13), "{err}");
+    assert!(!err.contains("panicked"), "{err}");
 }
 
 #[test]

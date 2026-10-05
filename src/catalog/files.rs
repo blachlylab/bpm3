@@ -663,6 +663,17 @@ impl Catalog {
         Ok(self.query_files_page(query, Window::ALL)?.rows)
     }
 
+    /// How many files match `query`. The same limits as [`Self::query_files`],
+    /// without reading each file's locations, digests, and links.
+    pub fn count_files(&mut self, query: &FileQuery) -> Result<i64, Error> {
+        let snapshot = self.conn.transaction()?;
+        let (clauses, values) = file_filter(&snapshot, query)?;
+        let sql = files_sql("SELECT COUNT(*) FROM files f", &clauses, false);
+        let count: i64 = snapshot.query_row(&sql, params_from_iter(values), |row| row.get(0))?;
+        drop_under(&snapshot, query)?;
+        Ok(count)
+    }
+
     /// One window of a file query, in file-id order. Details are read only for
     /// the files in the window.
     pub fn query_files_page(
@@ -672,74 +683,8 @@ impl Catalog {
     ) -> Result<Paged<FileRow>, Error> {
         // One read transaction, so the ids and their details are one snapshot.
         let snapshot = self.conn.transaction()?;
-        let mut clauses = Vec::new();
-        let mut values: Vec<Value> = Vec::new();
-        if let Some(under) = &query.under {
-            let index = load_index(&snapshot)?;
-            let mut nodes = Vec::new();
-            let mut seen = HashSet::new();
-            for root in resolve_all(&snapshot, &index, under)? {
-                if seen.insert(root) {
-                    nodes.push(root);
-                }
-                collect_descendants_seen(root, &index, &mut nodes, &mut seen);
-            }
-            snapshot.execute("DROP TABLE IF EXISTS temp.bpm_under", [])?;
-            snapshot.execute(
-                "CREATE TEMP TABLE bpm_under (node_type TEXT, id TEXT, PRIMARY KEY (node_type, id))",
-                [],
-            )?;
-            {
-                let mut insert =
-                    snapshot.prepare("INSERT INTO temp.bpm_under (node_type, id) VALUES (?, ?)")?;
-                for id in nodes {
-                    insert.execute(params![index.get(id).node_type.slug(), id.to_string()])?;
-                }
-            }
-            // The entity set drives the join (`CROSS JOIN`), through the
-            // `(node_type, node_id)` index on links.
-            let mut clause = String::from(
-                "f.id IN (SELECT l.file_id FROM temp.bpm_under u CROSS JOIN file_links l
-                 WHERE l.node_type = u.node_type AND l.node_id = u.id",
-            );
-            if let Some(role) = &query.role {
-                clause.push_str(" AND l.role = ?");
-                values.push(Value::Text(role.clone()));
-            }
-            clause.push(')');
-            clauses.push(clause);
-        } else if let Some(role) = &query.role {
-            clauses.push("f.id IN (SELECT file_id FROM file_links WHERE role = ?)".into());
-            values.push(Value::Text(role.clone()));
-        }
-        if query.unlinked {
-            clauses.push("NOT EXISTS (SELECT 1 FROM file_links l WHERE l.file_id = f.id)".into());
-        }
-        if let Some((algorithm, hex)) = &query.digest {
-            clauses.push(
-                "f.id IN (SELECT file_id FROM file_digests WHERE algorithm = ? AND digest = ? AND current = 1)"
-                    .into(),
-            );
-            values.push(Value::Text(algorithm.clone()));
-            values.push(Value::Text(hex.clone()));
-        }
-        if !query.drift.is_empty() {
-            let states: Vec<&str> = query
-                .drift
-                .iter()
-                .map(|state| drift_predicate(*state))
-                .collect();
-            clauses.push(format!(
-                "EXISTS (SELECT 1 FROM file_locations x WHERE x.file_id = f.id AND ({}))",
-                states.join(" OR ")
-            ));
-        }
-        let mut sql = String::from("SELECT f.id FROM files f");
-        if !clauses.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&clauses.join(" AND "));
-        }
-        sql.push_str(" ORDER BY f.id");
+        let (clauses, values) = file_filter(&snapshot, query)?;
+        let sql = files_sql("SELECT f.id FROM files f", &clauses, true);
         let ids = {
             let mut stmt = snapshot.prepare(&sql)?;
             stmt.query_map(params_from_iter(values), |row| row.get::<_, String>(0))?
@@ -747,9 +692,7 @@ impl Catalog {
         };
         let total = ids.len();
         let rows = load_files(&snapshot, &window.apply(ids))?;
-        if query.under.is_some() {
-            snapshot.execute("DROP TABLE IF EXISTS temp.bpm_under", [])?;
-        }
+        drop_under(&snapshot, query)?;
         Ok(Paged { total, rows })
     }
 
@@ -880,6 +823,93 @@ pub(super) fn linked_files(
         total: total as usize,
         rows: load_files(conn, &ids)?,
     })
+}
+
+/// The `WHERE` clauses of a file query, and the bound values in order. When
+/// `under` is set, creates `temp.bpm_under` for the caller to drop.
+fn file_filter(conn: &Connection, query: &FileQuery) -> Result<(Vec<String>, Vec<Value>), Error> {
+    let mut clauses = Vec::new();
+    let mut values: Vec<Value> = Vec::new();
+    if let Some(under) = &query.under {
+        let index = load_index(conn)?;
+        let mut nodes = Vec::new();
+        let mut seen = HashSet::new();
+        for root in resolve_all(conn, &index, under)? {
+            if seen.insert(root) {
+                nodes.push(root);
+            }
+            collect_descendants_seen(root, &index, &mut nodes, &mut seen);
+        }
+        conn.execute("DROP TABLE IF EXISTS temp.bpm_under", [])?;
+        conn.execute(
+            "CREATE TEMP TABLE bpm_under (node_type TEXT, id TEXT, PRIMARY KEY (node_type, id))",
+            [],
+        )?;
+        {
+            let mut insert =
+                conn.prepare("INSERT INTO temp.bpm_under (node_type, id) VALUES (?, ?)")?;
+            for id in nodes {
+                insert.execute(params![index.get(id).node_type.slug(), id.to_string()])?;
+            }
+        }
+        // The entity set drives the join (`CROSS JOIN`), through the
+        // `(node_type, node_id)` index on links.
+        let mut clause = String::from(
+            "f.id IN (SELECT l.file_id FROM temp.bpm_under u CROSS JOIN file_links l
+             WHERE l.node_type = u.node_type AND l.node_id = u.id",
+        );
+        if let Some(role) = &query.role {
+            clause.push_str(" AND l.role = ?");
+            values.push(Value::Text(role.clone()));
+        }
+        clause.push(')');
+        clauses.push(clause);
+    } else if let Some(role) = &query.role {
+        clauses.push("f.id IN (SELECT file_id FROM file_links WHERE role = ?)".into());
+        values.push(Value::Text(role.clone()));
+    }
+    if query.unlinked {
+        clauses.push("NOT EXISTS (SELECT 1 FROM file_links l WHERE l.file_id = f.id)".into());
+    }
+    if let Some((algorithm, hex)) = &query.digest {
+        clauses.push(
+            "f.id IN (SELECT file_id FROM file_digests WHERE algorithm = ? AND digest = ? AND current = 1)"
+                .into(),
+        );
+        values.push(Value::Text(algorithm.clone()));
+        values.push(Value::Text(hex.clone()));
+    }
+    if !query.drift.is_empty() {
+        let states: Vec<&str> = query
+            .drift
+            .iter()
+            .map(|state| drift_predicate(*state))
+            .collect();
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM file_locations x WHERE x.file_id = f.id AND ({}))",
+            states.join(" OR ")
+        ));
+    }
+    Ok((clauses, values))
+}
+
+fn files_sql(select: &str, clauses: &[String], order: bool) -> String {
+    let mut sql = select.to_string();
+    if !clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clauses.join(" AND "));
+    }
+    if order {
+        sql.push_str(" ORDER BY f.id");
+    }
+    sql
+}
+
+fn drop_under(conn: &Connection, query: &FileQuery) -> Result<(), Error> {
+    if query.under.is_some() {
+        conn.execute("DROP TABLE IF EXISTS temp.bpm_under", [])?;
+    }
+    Ok(())
 }
 
 /// Columns of `file_locations x` for one operator state, as in the

@@ -241,6 +241,7 @@ dependencies = [
  "clap",
  "form_urlencoded",
  "globset",
+ "libc",
  "md-5",
  "rusqlite",
  "serde_json",

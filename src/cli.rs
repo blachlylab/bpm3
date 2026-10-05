@@ -257,6 +257,9 @@ enum QueryCmd {
         /// algorithm:hex, such as blake3:<hex>. Matches a current digest.
         #[arg(long)]
         digest: Option<String>,
+        /// Print how many files match, instead of the rows.
+        #[arg(short, long)]
+        count: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: OutFmt,
     },
@@ -605,21 +608,30 @@ fn dispatch() -> Result<(), Error> {
                 unlinked,
                 drift,
                 digest,
+                count,
                 format,
             } => {
                 let digest = digest
                     .as_deref()
                     .map(crate::model::parse_digest)
                     .transpose()?;
-                let mut catalog = open_read(cli.catalog.as_deref())?;
-                let rows = catalog.query_files(&FileQuery {
+                let query = FileQuery {
                     under,
                     role,
                     unlinked,
                     drift: drift.into_iter().map(Drift::from).collect(),
                     digest,
-                })?;
-                print!("{}", query::render_files(&rows, format.into()));
+                };
+                let mut catalog = open_read(cli.catalog.as_deref())?;
+                if count {
+                    print!(
+                        "{}",
+                        query::render_count(catalog.count_files(&query)?, format.into())
+                    );
+                } else {
+                    let rows = catalog.query_files(&query)?;
+                    print!("{}", query::render_files(&rows, format.into()));
+                }
             }
             QueryCmd::Impact { .. } => return Err(Error::NotThisMilestone("impact")),
             QueryCmd::Lineage { .. } => return Err(Error::NotThisMilestone("lineage")),
