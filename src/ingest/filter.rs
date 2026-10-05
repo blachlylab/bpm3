@@ -16,6 +16,15 @@ pub struct FilterSpec {
     /// `--blacklist`: replaces the global list for this run.
     pub blacklist: Option<Vec<String>>,
     pub no_default_blacklist: bool,
+    /// `--whitelist`: replaces the global list for this run.
+    /// `None` uses the config list. `Some` replaces it, including an empty list.
+    pub whitelist: Option<Vec<String>>,
+}
+
+/// The two lists from `~/.bpm/config.toml`. A missing file or a missing key is empty.
+#[derive(Debug, Default, Clone)]
+pub struct GlobalLists {
+    pub blacklist: Vec<String>,
     pub whitelist: Vec<String>,
 }
 
@@ -28,25 +37,32 @@ pub fn split_patterns(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// The global blacklist from `~/.bpm/config.toml`. A missing file is an empty
-/// list. A file that is not valid TOML, or a `blacklist` that is not an array of
-/// strings, is an error rather than a silently ignored setting.
-pub fn global_blacklist(home: &Path) -> Result<Vec<String>, Error> {
+/// The global lists from `~/.bpm/config.toml`. A missing file is two empty
+/// lists. A file that is not valid TOML, or a `blacklist` or `whitelist` that
+/// is not an array of strings, is an error rather than a silently ignored setting.
+pub fn global_lists(home: &Path) -> Result<GlobalLists, Error> {
     let path = home.join(".bpm").join("config.toml");
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(GlobalLists::default()),
         Err(err) => return Err(err.into()),
     };
     let table: toml::Table = text
         .parse()
         .map_err(|err| Error::Message(format!("{}: {err}", path.display())))?;
-    let Some(value) = table.get("blacklist") else {
+    Ok(GlobalLists {
+        blacklist: string_array(&table, "blacklist", &path)?,
+        whitelist: string_array(&table, "whitelist", &path)?,
+    })
+}
+
+fn string_array(table: &toml::Table, key: &str, path: &Path) -> Result<Vec<String>, Error> {
+    let Some(value) = table.get(key) else {
         return Ok(Vec::new());
     };
     let invalid = || {
         Error::Message(format!(
-            "{}: blacklist must be an array of strings",
+            "{}: {key} must be an array of strings",
             path.display()
         ))
     };
@@ -99,14 +115,15 @@ pub struct PathFilter {
 }
 
 impl PathFilter {
-    pub fn new(spec: &FilterSpec, global: Vec<String>) -> Result<Self, Error> {
-        let mut blacklist: Vec<String> = spec.blacklist.clone().unwrap_or(global);
+    pub fn new(spec: &FilterSpec, global: GlobalLists) -> Result<Self, Error> {
+        let mut blacklist: Vec<String> = spec.blacklist.clone().unwrap_or(global.blacklist);
         if !spec.no_default_blacklist {
             blacklist.extend(BUILT_IN.iter().map(|name| name.to_string()));
         }
+        let whitelist = spec.whitelist.clone().unwrap_or(global.whitelist);
         Ok(Self {
             blacklist: Patterns::new(blacklist.iter().map(String::as_str))?,
-            allow: Patterns::new(spec.whitelist.iter().map(String::as_str))?,
+            allow: Patterns::new(whitelist.iter().map(String::as_str))?,
         })
     }
 
@@ -146,11 +163,34 @@ mod tests {
             &FilterSpec {
                 blacklist: blacklist.map(|list| list.iter().map(|p| p.to_string()).collect()),
                 no_default_blacklist: no_default,
-                whitelist: allow.iter().map(|p| p.to_string()).collect(),
+                whitelist: Some(allow.iter().map(|p| p.to_string()).collect()),
             },
-            global.iter().map(|p| p.to_string()).collect(),
+            GlobalLists {
+                blacklist: global.iter().map(|p| p.to_string()).collect(),
+                whitelist: Vec::new(),
+            },
         )
         .unwrap()
+    }
+
+    fn lists(home_text: Option<&str>) -> Result<GlobalLists, Error> {
+        let home = std::env::temp_dir().join(format!(
+            "bpm3-filter-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let result = (|| {
+            if let Some(text) = home_text {
+                fs::create_dir_all(home.join(".bpm"))?;
+                fs::write(home.join(".bpm/config.toml"), text)?;
+            }
+            global_lists(&home)
+        })();
+        let _ = fs::remove_dir_all(&home);
+        result
     }
 
     #[test]
@@ -189,6 +229,85 @@ mod tests {
         // Denied wins over allowed.
         let both = filter(Some(&["*.tmp.fq.gz"]), &[], false, &["*.fq.gz"]);
         assert!(!both.allows("x.tmp.fq.gz"));
+    }
+
+    #[test]
+    fn a_run_whitelist_replaces_the_global_one() {
+        let global = PathFilter::new(
+            &FilterSpec {
+                whitelist: None,
+                ..FilterSpec::default()
+            },
+            GlobalLists {
+                blacklist: Vec::new(),
+                whitelist: vec!["*.fq.gz".into()],
+            },
+        )
+        .unwrap();
+        assert!(global.allows("lane1/S1.fq.gz"));
+        assert!(!global.allows("S1.bam"));
+        assert!(!global.allows(".DS_Store"));
+
+        let run = PathFilter::new(
+            &FilterSpec {
+                whitelist: Some(vec!["*.bam".into()]),
+                ..FilterSpec::default()
+            },
+            GlobalLists {
+                blacklist: Vec::new(),
+                whitelist: vec!["*.fq.gz".into()],
+            },
+        )
+        .unwrap();
+        assert!(run.allows("S1.bam"));
+        assert!(!run.allows("S1.fq.gz"));
+
+        let cleared = PathFilter::new(
+            &FilterSpec {
+                whitelist: Some(Vec::new()),
+                no_default_blacklist: true,
+                ..FilterSpec::default()
+            },
+            GlobalLists {
+                blacklist: Vec::new(),
+                whitelist: vec!["*.fq.gz".into()],
+            },
+        )
+        .unwrap();
+        assert!(cleared.allows("notes.txt"));
+        assert!(cleared.allows(".DS_Store"));
+    }
+
+    #[test]
+    fn config_toml_reads_both_lists_and_rejects_a_string() {
+        let missing = lists(None).unwrap();
+        assert!(missing.blacklist.is_empty());
+        assert!(missing.whitelist.is_empty());
+
+        let both = lists(Some(
+            "blacklist = [\"*.txt\"]\nwhitelist = [\"*.fq.gz\", \"bams/**\"]\n",
+        ))
+        .unwrap();
+        assert_eq!(both.blacklist, vec!["*.txt"]);
+        assert_eq!(both.whitelist, vec!["*.fq.gz", "bams/**"]);
+
+        let only_blacklist = lists(Some("blacklist = [\"*.bak\"]\n")).unwrap();
+        assert_eq!(only_blacklist.whitelist, Vec::<String>::new());
+
+        let bad_whitelist = lists(Some("whitelist = \"*.fq.gz\"\n")).unwrap_err();
+        assert!(
+            bad_whitelist
+                .to_string()
+                .contains("whitelist must be an array of strings"),
+            "{bad_whitelist}"
+        );
+        let bad_blacklist = lists(Some("blacklist = \"*.txt\"\n")).unwrap_err();
+        assert!(
+            bad_blacklist
+                .to_string()
+                .contains("blacklist must be an array of strings"),
+            "{bad_blacklist}"
+        );
     }
 
     #[test]

@@ -119,7 +119,7 @@ Catalog files and `~/.bpm` are created with mode `0600` for files and `0700` for
 
 `~/.bpm/context.toml` may record named catalogs. It has no `current` key, and a command never opens a catalog because the file names it. Resolution stays `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.db`. Walk filters do not live in this file.
 
-`~/.bpm/config.toml` holds global tool settings. Today that is the blacklist, described in §6. A command reads it for those settings. It does not select a catalog.
+`~/.bpm/config.toml` holds global tool settings. Today that is the blacklist and the whitelist, described in §6. A command reads it for those settings. It does not select a catalog.
 
 A remote catalog entry, and `bpm use`, belong to Govern and are **UNSTABLE / TBD** (PRD §5 and the `*` rows in PRD §4.13). The `bpm serve` token is `--token` or `BPM_TOKEN`. It is not written into either file. `context.toml` may look like this:
 
@@ -381,15 +381,18 @@ The built-in blacklist is the file names `.DS_Store` and `Thumbs.db`. It always 
 
 Further patterns are globs. A pattern with no `/` matches the final path component, so `*.txt` skips that name at any depth. A pattern containing `/` is matched against the path relative to the walk root, or against the scan path as the whitelist is, and uses the same `*` and `**` rules.
 
-`~/.bpm/config.toml` may set a global list:
+`~/.bpm/config.toml` may set either list:
 
 ```toml
 blacklist = ["*.txt", "scratch/**"]
+whitelist = ["*.fq.gz", "*.bam"]
 ```
 
-`--blacklist '*.txt,*.bak'` replaces that global list for one run. The patterns are comma-separated. A pattern that itself contains a comma is written in the toml, as one string in the array. Passing `--blacklist` does not drop the built-in names. `--no-default-blacklist` does. There is no per-catalog blacklist and no blacklist file discovered by walking up from the data.
+`--blacklist '*.txt,*.bak'` replaces the blacklist for one run. `--whitelist '*.fq.gz,*.bam'` replaces the whitelist for one run. The patterns are comma-separated. A pattern that itself contains a comma is written in the toml, as one string in the array. Both flags may be repeated, and their comma-separated lists are joined. Passing `--blacklist` does not drop the built-in names. `--no-default-blacklist` does. `--blacklist ''` empties the global blacklist for one run. `--whitelist ''` empties the global whitelist for one run. There is no per-catalog list and no filter file discovered by walking up from the data.
 
-The whitelist is zero or more glob patterns, passed as `--whitelist '*.fq.gz,*.bam'`. Both flags may be repeated, and their comma-separated lists are joined. `--blacklist ''` empties the global list for one run. With none set, every path that survives the blacklist is eligible. With one or more set, a path must match at least one pattern and must not be denied. `*` does not cross `/`. `**` does. On ingest the pattern is matched against the path relative to the walk root. On scan it is matched against the location path relative to the scan root, or against the full URI when the scan covers a whole backend.
+The file is read when a run still takes at least one of the two lists from it. When both flags are set, the file is not read. A missing file, or a missing key, is an empty list. A file that is not valid TOML, or a `blacklist` or `whitelist` that is not an array of strings, is an error.
+
+With no whitelist in effect, every path that survives the blacklist is eligible. With one or more patterns, a path must match at least one and must not be denied. `*` does not cross `/`. `**` does. On ingest the pattern is matched against the path relative to the walk root. On scan it is matched against the location path relative to the scan root, or against the full URI when the scan covers a whole backend.
 
 ### Ingest walk
 

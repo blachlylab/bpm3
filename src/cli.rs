@@ -172,31 +172,36 @@ struct FilterArgs {
     /// Do not skip the built-in names (.DS_Store, Thumbs.db).
     #[arg(long)]
     no_default_blacklist: bool,
-    /// Comma-separated globs. When set, only matching paths are considered.
+    /// Comma-separated globs that replace the whitelist in ~/.bpm/config.toml for this run.
+    /// When the list in effect is non-empty, only matching paths are considered.
     #[arg(long, value_name = "PATTERNS")]
     whitelist: Vec<String>,
 }
 
 impl FilterArgs {
     fn build(&self) -> Result<PathFilter, Error> {
-        let spec = FilterSpec {
-            blacklist: (!self.blacklist.is_empty()).then(|| {
-                self.blacklist
+        let patterns = |values: &[String]| {
+            (!values.is_empty()).then(|| {
+                values
                     .iter()
                     .flat_map(|raw| filter::split_patterns(raw))
                     .collect()
-            }),
-            no_default_blacklist: self.no_default_blacklist,
-            whitelist: self
-                .whitelist
-                .iter()
-                .flat_map(|raw| filter::split_patterns(raw))
-                .collect(),
+            })
         };
-        // With no HOME there is no config file, which is an empty global list.
-        let global = match (&spec.blacklist, catalog::home_dir()) {
-            (None, Ok(home)) => filter::global_blacklist(&home)?,
-            _ => Vec::new(),
+        let spec = FilterSpec {
+            blacklist: patterns(&self.blacklist),
+            no_default_blacklist: self.no_default_blacklist,
+            whitelist: patterns(&self.whitelist),
+        };
+        // The file is read when a run still takes at least one list from it.
+        // With no HOME there is no config file, which is two empty lists.
+        let global = if spec.blacklist.is_none() || spec.whitelist.is_none() {
+            match catalog::home_dir() {
+                Ok(home) => filter::global_lists(&home)?,
+                Err(_) => filter::GlobalLists::default(),
+            }
+        } else {
+            filter::GlobalLists::default()
         };
         PathFilter::new(&spec, global)
     }

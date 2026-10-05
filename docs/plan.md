@@ -31,7 +31,7 @@ PRD slice B, local filesystem only. Scenarios 10–21, except the object-store h
 
 - Ingest, the first fingerprint scheme (the scheme name stored on the row), BLAKE3 on scan and on duplicate confirmation, locations, drift, acknowledge, link, and unlink.
 - The catalog lock is held only around each committed batch. Hashing the next batch happens with the lock released. A per-run flock is how a crash is detected.
-- The built-in blacklist, a global list in `~/.bpm/config.toml`, `--blacklist` for one run, and the glob whitelist.
+- The built-in blacklist, and a global blacklist and whitelist in `~/.bpm/config.toml`. `--blacklist` and `--whitelist` replace those lists for one run.
 - `bpm scan --md5` when an archive requires MD5. It is off unless the flag is passed.
 
 After this stage the benchmark catalog can be loaded. Scenario 31 runs before stage 4. It passed on 2026-10-04, after two library fixes it exposed: [Scenario 31 benchmark](benchmarks/scenario31.md).

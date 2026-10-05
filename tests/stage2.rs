@@ -993,6 +993,133 @@ fn path_filters_apply_to_ingest_and_scan() {
 }
 
 #[test]
+fn a_config_whitelist_limits_ingest_until_a_flag_replaces_it() {
+    let env = Env::new("config-whitelist");
+    let run42 = env.data().join("run42");
+    for name in [
+        "S1.fq.gz",
+        "S1.bam",
+        "notes.txt",
+        "old.bak",
+        "scratch/tmp.fq.gz",
+        "keep/scratch/x.fq.gz",
+        ".DS_Store",
+    ] {
+        write(&run42.join(name), name.as_bytes());
+    }
+    fs::create_dir_all(env.home().join(".bpm")).unwrap();
+    fs::write(
+        env.home().join(".bpm/config.toml"),
+        "blacklist = [\"scratch/**\"]\nwhitelist = [\"*.fq.gz\"]\n",
+    )
+    .unwrap();
+
+    let uris = |env: &Env| -> Vec<String> {
+        let mut uris: Vec<String> = env
+            .files(&[])
+            .iter()
+            .flat_map(|file| {
+                strings(
+                    &file["locations"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|l| l["uri"].clone())
+                        .collect(),
+                )
+            })
+            .map(|uri| {
+                uri.strip_prefix(&format!("{}/", run42.display()))
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        uris.sort();
+        uris
+    };
+
+    env.ingest(&run42);
+    assert_eq!(uris(&env), ["S1.fq.gz", "keep/scratch/x.fq.gz"]);
+    let scan = ok(env.bpm(&["scan", run42.to_str().unwrap()]));
+    assert!(scan.out.contains(": 2 locations"), "{}", scan.out);
+
+    // --whitelist replaces the config list. The config blacklist still applies.
+    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--whitelist", "*.bam"]));
+    assert_eq!(uris(&env), ["S1.bam", "S1.fq.gz", "keep/scratch/x.fq.gz"]);
+    // A later scan with no flag is back on the config whitelist, so the bam is not checked.
+    let scan = ok(env.bpm(&["scan", run42.to_str().unwrap()]));
+    assert!(scan.out.contains(": 2 locations"), "{}", scan.out);
+    let scan = ok(env.bpm(&["scan", run42.to_str().unwrap(), "--whitelist", ""]));
+    assert!(scan.out.contains(": 3 locations"), "{}", scan.out);
+    let scan = ok(env.bpm(&["scan", run42.to_str().unwrap(), "--whitelist", "*.bam"]));
+    assert!(scan.out.contains(": 1 locations"), "{}", scan.out);
+
+    // --blacklist replaces only the blacklist. scratch/** is gone; *.fq.gz remains.
+    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--blacklist", ""]));
+    assert_eq!(
+        uris(&env),
+        [
+            "S1.bam",
+            "S1.fq.gz",
+            "keep/scratch/x.fq.gz",
+            "scratch/tmp.fq.gz"
+        ]
+    );
+
+    // --whitelist '' clears the config whitelist. Built-ins and scratch/** return.
+    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--whitelist", ""]));
+    assert_eq!(
+        uris(&env),
+        [
+            "S1.bam",
+            "S1.fq.gz",
+            "keep/scratch/x.fq.gz",
+            "notes.txt",
+            "old.bak",
+            "scratch/tmp.fq.gz"
+        ]
+    );
+
+    // Lifting the built-in names does not lift the config whitelist.
+    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--no-default-blacklist"]));
+    assert!(!uris(&env).iter().any(|uri| uri == ".DS_Store"));
+    ok(env.bpm(&[
+        "ingest",
+        run42.to_str().unwrap(),
+        "--no-default-blacklist",
+        "--whitelist",
+        "",
+    ]));
+    assert!(uris(&env).iter().any(|uri| uri == ".DS_Store"));
+
+    fs::write(
+        env.home().join(".bpm/config.toml"),
+        "whitelist = \"*.fq.gz\"\n",
+    )
+    .unwrap();
+    let bad = fail(env.bpm(&["ingest", run42.to_str().unwrap()]));
+    assert!(
+        bad.err.contains("whitelist must be an array of strings"),
+        "{}",
+        bad.err
+    );
+    // Both flags replace the file, so a broken config is not read.
+    write(&run42.join("extra.bam"), b"extra");
+    write(&run42.join("extra.txt"), b"extra");
+    ok(env.bpm(&[
+        "ingest",
+        run42.to_str().unwrap(),
+        "--blacklist",
+        "*.txt",
+        "--whitelist",
+        "*.bam",
+    ]));
+    let uris = uris(&env);
+    assert!(uris.iter().any(|uri| uri == "extra.bam"), "{uris:?}");
+    assert!(!uris.iter().any(|uri| uri == "extra.txt"), "{uris:?}");
+}
+
+#[test]
 #[cfg(unix)]
 fn symlinks_follow_the_walk_rules() {
     use std::os::unix::fs::symlink;
