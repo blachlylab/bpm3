@@ -323,6 +323,110 @@ fn scenario_13_duplicate_after_scan_joins_the_existing_file() {
 }
 
 #[test]
+fn ingest_logs_its_start_and_counts_every_hundred_files() {
+    let env = Env::new("progress");
+    let one = env.data().join("one");
+    write(&one.join("notes.txt"), b"notes\n");
+    let quiet = env.ingest(&one);
+    assert!(
+        quiet
+            .err
+            .contains(&format!("bpm: ingest {}", one.display())),
+        "{}",
+        quiet.err
+    );
+    assert!(
+        quiet.err.contains("bpm: blacklist .DS_Store, Thumbs.db"),
+        "{}",
+        quiet.err
+    );
+    assert!(!quiet.err.contains("whitelist"), "{}", quiet.err);
+    assert!(!quiet.err.contains("files seen"), "{}", quiet.err);
+
+    let many = env.data().join("many");
+    for index in 0..100 {
+        write(
+            &many.join(format!("f{index:03}.png")),
+            format!("{index}\n").as_bytes(),
+        );
+    }
+    write(&many.join("skip.txt"), b"no");
+    let run = ok(env.bpm(&[
+        "ingest",
+        many.to_str().unwrap(),
+        "--whitelist",
+        "*.png",
+        "--blacklist",
+        "*.tmp",
+        "--no-default-blacklist",
+    ]));
+    assert!(
+        run.err.contains(&format!("bpm: ingest {}", many.display())),
+        "{}",
+        run.err
+    );
+    assert!(run.err.contains("bpm: whitelist *.png"), "{}", run.err);
+    assert!(run.err.contains("bpm: blacklist *.tmp"), "{}", run.err);
+    // The test captures stderr through a pipe, so the count is a plain line.
+    // A terminal rewrites that line instead; see paint_progress.
+    assert!(run.err.contains("bpm: 100 files seen"), "{}", run.err);
+    assert!(!run.err.contains('\u{1b}'), "{}", run.err);
+    assert!(!run.err.contains("bpm: 200 files seen"), "{}", run.err);
+    assert!(!run.err.contains("skip.txt"), "{}", run.err);
+    assert!(
+        run.out.contains("100 files seen, 100 new files"),
+        "{}",
+        run.out
+    );
+    assert_eq!(run.out.lines().filter(|line| !line.is_empty()).count(), 1);
+}
+
+#[test]
+fn ingest_summary_counts_copies_without_listing_paths() {
+    let env = Env::new("copies");
+    let pics = env.data().join("pics");
+    let bytes = b"same bytes\n";
+    write(&pics.join("a.png"), bytes);
+    write(&pics.join("b.png"), bytes);
+    write(&pics.join("c.png"), bytes);
+    write(&pics.join("other.png"), b"different\n");
+
+    let run = env.ingest(&pics);
+    assert!(
+        run.out
+            .contains("4 files seen, 2 new files, 4 new locations, 2 copies, 0 already recorded"),
+        "{}",
+        run.out
+    );
+    // The summary carries the count. Paths stay in the catalog, not on the console.
+    assert_eq!(run.out.lines().filter(|line| !line.is_empty()).count(), 1);
+    let a = pics.join("a.png");
+    assert_eq!(env.count("files"), 2);
+    assert_eq!(env.file_at(&a)["locations"].as_array().unwrap().len(), 3);
+
+    let more = env.data().join("more");
+    write(&more.join("d.png"), bytes);
+    let again = env.ingest(&more);
+    assert!(
+        again
+            .out
+            .contains("1 files seen, 0 new files, 1 new locations, 1 copies, 0 already recorded"),
+        "{}",
+        again.out
+    );
+    assert!(!again.out.contains("d.png"), "{}", again.out);
+
+    let repeat = env.ingest(&pics);
+    assert!(
+        repeat
+            .out
+            .contains("4 files seen, 0 new files, 0 new locations, 0 copies, 4 already recorded"),
+        "{}",
+        repeat.out
+    );
+}
+
+#[test]
 fn scenario_13_duplicate_before_any_blake3_hashes_both_copies() {
     let env = Env::new("s13b");
     let run42 = env.data().join("run42");
@@ -1117,6 +1221,41 @@ fn a_config_whitelist_limits_ingest_until_a_flag_replaces_it() {
     let uris = uris(&env);
     assert!(uris.iter().any(|uri| uri == "extra.bam"), "{uris:?}");
     assert!(!uris.iter().any(|uri| uri == "extra.txt"), "{uris:?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_broken_symlink_is_counted_and_the_run_succeeds() {
+    use std::os::unix::fs::symlink;
+    let env = Env::new("broken-link");
+    let one = env.data().join("one");
+    write(&one.join("keep.png"), b"png\n");
+    symlink(one.join("missing.chain"), one.join("hg19.over.chain")).unwrap();
+    let run = env.ingest(&one);
+    assert!(
+        run.err.contains("bpm: 1 broken symbolic link\n"),
+        "{}",
+        run.err
+    );
+    assert!(!run.err.contains("hg19.over.chain"), "{}", run.err);
+    assert!(run.out.contains("1 files seen"), "{}", run.out);
+    assert!(run.out.contains("0 errors"), "{}", run.out);
+    assert_eq!(env.count("files"), 1);
+    assert_eq!(env.count("ingest_errors"), 0);
+
+    let two = env.data().join("two");
+    write(&two.join("keep.png"), b"png\n");
+    symlink(two.join("gone-a"), two.join("a.chain")).unwrap();
+    symlink(two.join("gone-b"), two.join("b.chain")).unwrap();
+    let run = env.ingest(&two);
+    assert!(
+        run.err.contains("bpm: 2 broken symbolic links"),
+        "{}",
+        run.err
+    );
+    assert!(!run.err.contains("a.chain"), "{}", run.err);
+    assert!(!run.err.contains("b.chain"), "{}", run.err);
+    assert!(run.out.contains("0 errors"), "{}", run.out);
 }
 
 #[test]

@@ -65,6 +65,9 @@ pub enum IngestEntry {
 pub struct IngestApplied {
     pub created: u64,
     pub located: u64,
+    /// Locations attached to a file that already had one, or to a file that
+    /// already existed. The summary reports this count and not the paths.
+    pub copies: u64,
 }
 
 /// Which locations a scan reads. `root` is an absolute path; a location is in
@@ -216,12 +219,14 @@ impl Catalog {
                                 insert_location(&tx, &existing, one, "match", &stamp)?;
                             }
                             applied.located += fresh.len() as u64;
+                            applied.copies += fresh.len() as u64;
                             continue;
                         }
                     }
                     insert_file(&tx, fingerprint.as_ref(), blake3.as_deref(), &fresh, &stamp)?;
                     applied.created += 1;
                     applied.located += fresh.len() as u64;
+                    applied.copies += fresh.len().saturating_sub(1) as u64;
                 }
                 IngestEntry::Located {
                     file_id,
@@ -267,6 +272,7 @@ impl Catalog {
                     }
                     insert_location(&tx, &id, seen, "match", &stamp)?;
                     applied.located += 1;
+                    applied.copies += 1;
                 }
             }
         }

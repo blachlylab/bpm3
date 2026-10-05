@@ -112,6 +112,9 @@ impl Patterns {
 pub struct PathFilter {
     blacklist: Patterns,
     allow: Patterns,
+    /// Patterns in effect, including the built-in names. For the kickoff line.
+    blacklist_patterns: Vec<String>,
+    whitelist_patterns: Vec<String>,
 }
 
 impl PathFilter {
@@ -121,10 +124,22 @@ impl PathFilter {
             blacklist.extend(BUILT_IN.iter().map(|name| name.to_string()));
         }
         let whitelist = spec.whitelist.clone().unwrap_or(global.whitelist);
+        let blacklist_globs = Patterns::new(blacklist.iter().map(String::as_str))?;
+        let allow = Patterns::new(whitelist.iter().map(String::as_str))?;
         Ok(Self {
-            blacklist: Patterns::new(blacklist.iter().map(String::as_str))?,
-            allow: Patterns::new(whitelist.iter().map(String::as_str))?,
+            blacklist: blacklist_globs,
+            allow,
+            blacklist_patterns: blacklist,
+            whitelist_patterns: whitelist,
         })
+    }
+
+    pub(crate) fn blacklist_patterns(&self) -> &[String] {
+        &self.blacklist_patterns
+    }
+
+    pub(crate) fn whitelist_patterns(&self) -> &[String] {
+        &self.whitelist_patterns
     }
 
     /// Whether a path survives the filters. `rel` uses `/` separators and is

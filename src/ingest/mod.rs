@@ -10,7 +10,7 @@ pub mod walk;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::io;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -29,12 +29,23 @@ use walk::{WalkItem, Walker};
 /// Files per committed batch. Internal; a crash keeps every committed batch.
 pub const BATCH: usize = 1000;
 
+/// How often the stderr count moves. A terminal rewrites one line; a pipe
+/// gets a new line, because a carriage return would not erase the last one.
+const PROGRESS_EVERY: u64 = 100;
+
 #[derive(Debug, Default)]
 pub struct IngestReport {
     pub run_id: Option<Uuid>,
     pub seen: u64,
     pub created: u64,
     pub located: u64,
+    /// Paths whose bytes matched a file and were stored as another location of it.
+    pub copies: u64,
+    /// Paths that were already locations, or were seen twice in one batch.
+    pub already: u64,
+    /// Symlinks whose targets could not be resolved. Not an error: the run
+    /// still succeeds, and stderr reports the count rather than the paths.
+    pub broken_links: u64,
     pub errors: Vec<(String, String)>,
     /// A new path with the size and fingerprint of these files, which could not
     /// be hashed to confirm. Not merged.
@@ -112,6 +123,7 @@ pub fn ingest(
         )));
     }
     let root_uri = utf8(&root)?;
+    announce(&root, filter);
     let run = catalog.start_run(RunKind::Ingest, POSIX, &root_uri)?;
     let mut report = IngestReport {
         run_id: Some(run.id),
@@ -132,11 +144,13 @@ fn ingest_walk(
 ) -> Result<(), Error> {
     let mut paths = Vec::with_capacity(BATCH);
     let mut errors = Vec::new();
+    let mut progress = Progress::new();
     for item in Walker::new(root) {
         match item {
             WalkItem::Error { path, message } => {
                 errors.push((path.to_string_lossy().into_owned(), message));
             }
+            WalkItem::BrokenLink => report.broken_links += 1,
             WalkItem::File {
                 path,
                 rel,
@@ -155,12 +169,13 @@ fn ingest_walk(
                         std::mem::take(&mut paths),
                         std::mem::take(&mut errors),
                         report,
+                        &mut progress,
                     )?;
                 }
             }
         }
     }
-    ingest_batch(catalog, run, paths, errors, report)
+    ingest_batch(catalog, run, paths, errors, report, &mut progress)
 }
 
 /// Plan one batch with no lock held, then apply it.
@@ -170,12 +185,16 @@ fn ingest_batch(
     paths: Vec<PathBuf>,
     mut errors: Vec<(String, String)>,
     report: &mut IngestReport,
+    progress: &mut Progress,
 ) -> Result<(), Error> {
     let mut entries: Vec<IngestEntry> = Vec::new();
     let mut in_batch = HashSet::new();
     // BLAKE3 of existing files hashed during this batch, by file id.
     let mut hashed: HashMap<Uuid, (String, String)> = HashMap::new();
     for path in paths {
+        // Count here, where each file is read, so the line moves during the
+        // slow part of a large directory rather than during the listing.
+        progress.file();
         let uri = match utf8(&path) {
             Ok(uri) => uri,
             Err(err) => {
@@ -184,6 +203,7 @@ fn ingest_batch(
             }
         };
         if !in_batch.insert(uri.clone()) || catalog.location_exists(POSIX, &uri)? {
+            report.already += 1;
             continue;
         }
         let meta = match fs::metadata(&path) {
@@ -226,8 +246,91 @@ fn ingest_batch(
     let applied = catalog.apply_ingest(run, &entries, &errors)?;
     report.created += applied.created;
     report.located += applied.located;
+    report.copies += applied.copies;
     report.errors.extend(errors);
     Ok(())
+}
+
+/// The directory and the filters actually in effect. The running count is
+/// separate: on a terminal it rewrites one line, every [`PROGRESS_EVERY`] files.
+fn announce(root: &Path, filter: &PathFilter) {
+    log_line(format!("ingest {}", root.display()));
+    if let Some(list) = join_patterns(filter.whitelist_patterns()) {
+        log_line(format!("whitelist {list}"));
+    }
+    if let Some(list) = join_patterns(filter.blacklist_patterns()) {
+        log_line(format!("blacklist {list}"));
+    }
+}
+
+fn join_patterns(patterns: &[String]) -> Option<String> {
+    if patterns.is_empty() {
+        return None;
+    }
+    Some(
+        patterns
+            .iter()
+            .map(|pattern| {
+                if pattern.contains([',', ' ']) {
+                    format!("\"{pattern}\"")
+                } else {
+                    pattern.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+struct Progress {
+    files: u64,
+    /// A count has been drawn, so a terminal line still needs its newline.
+    shown: bool,
+    tty: bool,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self {
+            files: 0,
+            shown: false,
+            tty: std::io::stderr().is_terminal(),
+        }
+    }
+
+    fn file(&mut self) {
+        self.files += 1;
+        if self.files.is_multiple_of(PROGRESS_EVERY) {
+            let _ = paint_progress(&mut std::io::stderr(), self.files, self.tty);
+            self.shown = true;
+        }
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        // The next stderr line (an error, or the shell prompt) must not
+        // continue the rewritten count.
+        if self.shown && self.tty {
+            eprintln!();
+        }
+    }
+}
+
+/// `tty` rewrites the current line: carriage return, erase to the end, then
+/// the count. A pipe cannot erase, so it gets a normal line.
+fn paint_progress(out: &mut impl Write, files: u64, tty: bool) -> io::Result<()> {
+    if tty {
+        write!(out, "\r\x1b[Kbpm: {files} files seen")?;
+    } else {
+        writeln!(out, "bpm: {files} files seen")?;
+    }
+    out.flush()
+}
+
+fn log_line(message: impl std::fmt::Display) {
+    eprintln!("bpm: {message}");
+    let _ = std::io::stderr().flush();
 }
 
 /// Decide what a new, fingerprinted path is: a copy of a file in this batch, a
@@ -602,4 +705,33 @@ fn utf8(path: &Path) -> Result<String, Error> {
     path.to_str()
         .map(String::from)
         .ok_or_else(|| Error::Message(format!("{} is not valid UTF-8", path.display())))
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::paint_progress;
+
+    #[test]
+    fn a_terminal_rewrites_one_line() {
+        let mut buf = Vec::new();
+        paint_progress(&mut buf, 100, true).unwrap();
+        paint_progress(&mut buf, 200, true).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            text,
+            "\r\x1b[Kbpm: 100 files seen\r\x1b[Kbpm: 200 files seen"
+        );
+        assert!(!text.contains('\n'));
+    }
+
+    #[test]
+    fn a_pipe_keeps_a_line_per_update() {
+        let mut buf = Vec::new();
+        paint_progress(&mut buf, 100, false).unwrap();
+        paint_progress(&mut buf, 200, false).unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "bpm: 100 files seen\nbpm: 200 files seen\n"
+        );
+    }
 }

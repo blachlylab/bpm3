@@ -403,6 +403,14 @@ fn dispatch() -> Result<(), Error> {
             let filter = filters.build()?;
             let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
             let report = ingest::ingest(&mut catalog, &path, &filter)?;
+            if report.broken_links > 0 {
+                let noun = if report.broken_links == 1 {
+                    "broken symbolic link"
+                } else {
+                    "broken symbolic links"
+                };
+                eprintln!("bpm: {} {noun}", report.broken_links);
+            }
             for (uri, message) in &report.errors {
                 eprintln!("bpm: {uri}: {message}");
             }
@@ -413,11 +421,13 @@ fn dispatch() -> Result<(), Error> {
                 );
             }
             println!(
-                "ingest {}: {} files seen, {} new files, {} new locations, {} errors",
+                "ingest {}: {} files seen, {} new files, {} new locations, {} copies, {} already recorded, {} errors",
                 report.run_id.map(|id| id.to_string()).unwrap_or_default(),
                 report.seen,
                 report.created,
                 report.located,
+                report.copies,
+                report.already,
                 report.errors.len()
             );
             if !report.errors.is_empty() {

@@ -139,3 +139,31 @@ whitelist = ["*.fq.gz"]
 | `bpm ingest run42 --no-default-blacklist --whitelist ''` | `S1.fq.gz`, `S1.bam`, `keep/scratch/x.fq.gz`, `notes.txt`, `old.bak`, `.DS_Store` |
 
 Each of these rows is also a fresh catalog. `scratch/tmp.fq.gz` matches `*.fq.gz` and stays out while `scratch/**` is in effect. `.DS_Store` stays out of the `--no-default-blacklist` row because the whitelist is still `*.fq.gz`. Clearing the whitelist on that same run is what lets the built-in name through. `notes.txt` and `old.bak` come in only when the whitelist is cleared, because neither name matches `*.fq.gz`.
+
+## What ingest counts
+
+Ingest prints one summary line on stdout. It does not list the paths. On stderr it names the directory and any whitelist or blacklist in effect. Every 100 files it rewrites a single count line, so a run of hundreds of thousands of files stays one line:
+
+```
+bpm: ingest /data/run42
+bpm: whitelist *.png
+bpm: blacklist .DS_Store, Thumbs.db
+bpm: 200 files seen
+```
+
+That count uses a carriage return and a clear-to-end-of-line. When stderr is not a terminal, each update is a normal line instead, because a pipe cannot erase the previous one.
+
+```
+ingest 01a1…: 47 files seen, 44 new files, 47 new locations, 3 copies, 0 already recorded, 0 errors
+```
+
+| Count | What it is |
+| --- | --- |
+| files seen | Paths that passed the filters. This is the `find` count. |
+| new files | File ids created. One id is one sequence of bytes, however many paths hold it. |
+| new locations | Paths recorded on a file. |
+| copies | Paths stored as another location because the bytes matched. `new files` plus `copies` is `new locations`. |
+| already recorded | Paths that were already locations. Ingest leaves them alone. |
+| errors | Paths that could not be recorded. They are also printed above the summary. |
+
+The paths themselves stay in the catalog. `bpm query files` shows the locations of a file. A second ingest of a directory already in the catalog reports `already recorded` for every path and `0 copies`. A path whose fingerprint matched but whose bytes could not be read is a `possible duplicate`, printed on its own line, and is not merged. Errors are printed the same way. A broken symbolic link is not one of those errors: stderr gets a count (`bpm: 2 broken symbolic links`) and the run exits 0. The walk tried to follow it, and a missing target does not say whether it was a file or a directory.

@@ -24,6 +24,9 @@ pub enum WalkItem {
         path: PathBuf,
         message: String,
     },
+    /// A symlink whose target could not be resolved. It may have been a file
+    /// or a directory; the walk cannot tell, and the run does not fail for it.
+    BrokenLink,
 }
 
 pub struct Walker {
@@ -60,6 +63,10 @@ impl Walker {
         });
     }
 
+    fn broken_link(&mut self) {
+        self.pending.push_back(WalkItem::BrokenLink);
+    }
+
     /// The path the filters see: relative to the root, or the final component
     /// for a link target outside it.
     fn rel(&self, path: &Path) -> String {
@@ -91,7 +98,7 @@ impl Walker {
                 .and_then(|target| fs::metadata(&target).map(|meta| (target, meta)))
             {
                 Ok(found) => found,
-                Err(err) => return self.error(&path, format!("broken symbolic link: {err}")),
+                Err(_) => return self.broken_link(),
             };
             if target_meta.is_dir() {
                 if !target.starts_with(&self.root) {
