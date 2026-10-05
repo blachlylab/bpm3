@@ -16,6 +16,27 @@ pub enum NodeType {
 }
 
 impl NodeType {
+    pub const ALL: [Self; 6] = [
+        Self::Program,
+        Self::Project,
+        Self::Case,
+        Self::Sample,
+        Self::RawData,
+        Self::Analysis,
+    ];
+
+    /// The label the UI shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Program => "Program",
+            Self::Project => "Project",
+            Self::Case => "Case",
+            Self::Sample => "Sample",
+            Self::RawData => "Raw Data",
+            Self::Analysis => "Analysis",
+        }
+    }
+
     pub fn slug(self) -> &'static str {
         match self {
             Self::Program => "program",
@@ -81,6 +102,8 @@ pub enum ModelError {
     Selector,
     #[error("invalid address")]
     Address,
+    #[error("a digest is algorithm:hex, such as blake3:<hex>")]
+    Digest,
 }
 
 /// A program or project name: 1–256 characters, no `/` or `:`, no ASCII controls,
@@ -265,6 +288,18 @@ pub enum Drift {
 }
 
 impl Drift {
+    pub const ALL: [Self; 5] = [
+        Self::Ok,
+        Self::Unverified,
+        Self::Missing,
+        Self::StatChanged,
+        Self::DigestMismatch,
+    ];
+
+    pub fn parse(slug: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|state| state.slug() == slug)
+    }
+
     pub fn slug(self) -> &'static str {
         match self {
             Self::Missing => "missing",
@@ -358,6 +393,70 @@ impl FileRow {
         states.dedup();
         states
     }
+}
+
+/// `algorithm:hex`, as `bpm query files --digest` and the search page take it.
+/// The algorithm and the hex are compared in lowercase.
+pub fn parse_digest(raw: &str) -> Result<(String, String), ModelError> {
+    let (algorithm, hex) = raw.split_once(':').ok_or(ModelError::Digest)?;
+    if algorithm.is_empty() || hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ModelError::Digest);
+    }
+    Ok((algorithm.to_ascii_lowercase(), hex.to_ascii_lowercase()))
+}
+
+/// Which slice of a result a caller wants. Pages are the read-only UI's; the
+/// CLI asks for everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub offset: usize,
+    pub limit: usize,
+}
+
+impl Window {
+    pub const ALL: Self = Self {
+        offset: 0,
+        limit: usize::MAX,
+    };
+
+    pub fn page(number: usize, size: usize) -> Self {
+        Self {
+            offset: number.saturating_sub(1).saturating_mul(size),
+            limit: size,
+        }
+    }
+
+    pub fn apply<T>(self, rows: Vec<T>) -> Vec<T> {
+        rows.into_iter()
+            .skip(self.offset)
+            .take(self.limit)
+            .collect()
+    }
+}
+
+/// One window of a result, and how many rows the whole result has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paged<T> {
+    pub total: usize,
+    pub rows: Vec<T>,
+}
+
+/// `bpm query summary` and the UI's home page (PRD §4.8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Summary {
+    /// Every node type, in tree order, with its count.
+    pub entities: Vec<(NodeType, i64)>,
+    pub files: i64,
+    pub bytes: i64,
+    pub unlinked: i64,
+    /// Files linked directly to entities of each type, and their bytes. A
+    /// file linked to two entities of one type counts once for that type.
+    pub linked_by_type: Vec<(NodeType, i64, i64)>,
+    pub locations_by_backend: Vec<(String, i64)>,
+    /// Locations in each drift state. One location can be in two states.
+    pub drift: Vec<(Drift, i64)>,
+    pub sample_kind: Vec<(String, i64)>,
+    pub assay: Vec<(String, i64)>,
 }
 
 #[cfg(test)]

@@ -1,0 +1,8 @@
+<h1>Enter the token</h1>
+<p>This catalog is served with a token. Enter the token that <code>bpm serve</code> was started with.</p>
+{% if failed %}<p class="error" role="alert">That token does not match.</p>{% endif %}
+<form method="post" action="/login">
+  <label for="token">Token</label>
+  <input id="token" name="token" type="password" autocomplete="current-password" required autofocus>
+  <button type="submit">Open the catalog</button>
+</form>

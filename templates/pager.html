@@ -1,0 +1,9 @@
+{#- Pagination links. Plain hrefs, so they work without JavaScript and
+    hx-boost can enhance them. Expects a variable named `pager`. -#}
+{%- if pager.pages > 1 %}
+<nav class="pager" aria-label="Pages">
+  {%- if let Some(href) = pager.prev %}<a href="{{ href }}" rel="prev">Previous</a>{% endif %}
+  <span>Page {{ pager.page }} of {{ pager.pages }}</span>
+  {%- if let Some(href) = pager.next %}<a href="{{ href }}" rel="next">Next</a>{% endif %}
+</nav>
+{%- endif %}

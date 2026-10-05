@@ -141,6 +141,18 @@ enum Command {
         #[command(subcommand)]
         what: QueryCmd,
     },
+    /// Serve the read-only web UI. Listens on 127.0.0.1:3000 unless told otherwise.
+    Serve {
+        /// Address to listen on. Setting it, to any value, requires a token.
+        #[arg(long, env = "BPM_HOST")]
+        host: Option<String>,
+        /// Port to listen on. 0 picks a free port and prints it.
+        #[arg(long, env = "BPM_PORT")]
+        port: Option<u16>,
+        /// Token the login page asks for. Never printed.
+        #[arg(long, env = "BPM_TOKEN", hide_env_values = true)]
+        token: Option<String>,
+    },
     /// Govern client. No server is configured in Core.
     Login,
     /// Govern client. No server is configured in Core.
@@ -251,7 +263,10 @@ enum QueryCmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         _args: Vec<String>,
     },
-    Summary,
+    Summary {
+        #[arg(long, value_enum, default_value = "table")]
+        format: OutFmt,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -577,7 +592,10 @@ fn dispatch() -> Result<(), Error> {
                 digest,
                 format,
             } => {
-                let digest = digest.as_deref().map(parse_digest).transpose()?;
+                let digest = digest
+                    .as_deref()
+                    .map(crate::model::parse_digest)
+                    .transpose()?;
                 let mut catalog = open_read(cli.catalog.as_deref())?;
                 let rows = catalog.query_files(&FileQuery {
                     under,
@@ -590,21 +608,22 @@ fn dispatch() -> Result<(), Error> {
             }
             QueryCmd::Impact { .. } => return Err(Error::NotThisMilestone("impact")),
             QueryCmd::Lineage { .. } => return Err(Error::NotThisMilestone("lineage")),
-            QueryCmd::Summary => return Err(Error::NotThisMilestone("summary")),
+            QueryCmd::Summary { format } => {
+                let mut catalog = open_read(cli.catalog.as_deref())?;
+                print!(
+                    "{}",
+                    query::render_summary(&catalog.summary()?, format.into())
+                );
+            }
         },
+        Command::Serve { host, port, token } => {
+            let config = crate::web::ServeConfig::resolve(host, port, token)?;
+            let path = catalog::resolve_catalog_path(cli.catalog.as_deref())?;
+            crate::web::serve(path, config)?;
+        }
         Command::Login | Command::Logout | Command::Use { .. } => return Err(Error::NoServer),
     }
     Ok(())
-}
-
-/// `algorithm:hex`. The algorithm and the hex are compared in lowercase.
-fn parse_digest(raw: &str) -> Result<(String, String), Error> {
-    let invalid = || Error::Message(format!("{raw} is not algorithm:hex, such as blake3:<hex>"));
-    let (algorithm, hex) = raw.split_once(':').ok_or_else(invalid)?;
-    if algorithm.is_empty() || hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(invalid());
-    }
-    Ok((algorithm.to_ascii_lowercase(), hex.to_ascii_lowercase()))
 }
 
 /// Opens for reading and refuses a catalog whose entity tree is broken. Every

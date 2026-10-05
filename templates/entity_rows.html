@@ -1,0 +1,17 @@
+{#- A table of entities. Expects `rows` and `pager`. -#}
+<p class="count">{{ pager.summary }}</p>
+{%- if !rows.is_empty() %}
+<table>
+  <thead><tr><th>Type</th><th>Entity</th><th>Metadata</th></tr></thead>
+  <tbody>
+  {%- for row in rows %}
+    <tr>
+      <td>{{ row.type_label }}</td>
+      <td><a href="{{ row.href }}">{{ row.label }}</a></td>
+      <td>{% for (key, value) in row.metadata %}<span class="pair"><span class="key">{{ key }}</span>:<span class="value">{{ value }}</span></span> {% endfor %}</td>
+    </tr>
+  {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+{%- include "pager.html" %}

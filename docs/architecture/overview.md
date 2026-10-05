@@ -17,7 +17,7 @@ The Cargo package is still named `bpm3`. The binary target is `bpm` (`cargo buil
 | Catalog store | SQLite, embedded, via the `rusqlite` crate with the bundled engine | One file per catalog. Declared foreign keys, indexed lookups over millions of file and metadata rows, and concurrent readers beside one writer across processes. No separate database process in Core. The choice is [ADR 0001](../adr/0001-sqlite-catalog-store.md). |
 | HTTP | Axum | Local `bpm serve`. `bpmd` is PRD §5, which is unstable. |
 | HTML | Askama templates, HTMX attributes in those templates | Server-rendered pages. Partials swap into the existing page. |
-| Front-end assets | HTMX, the compiled stylesheet (Tailwind CSS and DaisyUI), and any other JS or CSS | Vendored in the repository under `assets/vendor/`. A build embeds those files and does not download them. Regenerating the stylesheet is optional and its output is committed back. |
+| Front-end assets | A hand-written stylesheet today. HTMX later, and possibly a compiled Tailwind CSS and DaisyUI stylesheet | Committed to the repository, third-party files under `assets/vendor/`. A build embeds them and does not download them. |
 
 JS, CSS, and the HTMX runtime are vendored into the tree. The `bpm` binary embeds the copies under `assets/vendor/`.
 
@@ -499,9 +499,25 @@ Snapshot body is the content body plus, on each file, `locations` (backend, uri,
 | Port | `--port` | `BPM_PORT` | `3000` |
 | Token | `--token` | `BPM_TOKEN` | unset |
 
-If `--host` or `BPM_HOST` is set and neither token source is set, the process exits before binding. When a token is set, a login page posts the operator's entry and compares it to the configured value. A match sets an `HttpOnly` session cookie. A mismatch renders the login page again. The token is not logged and not stored in the catalog. With no token configured, the catalog routes are open, which is allowed only on the default host.
+If `--host` or `BPM_HOST` is set, to any value including a loopback address, and neither token source is set, the process exits before binding. When a token is set, a login page posts the operator's entry and compares it to the configured value without stopping at the first differing byte. A match sets an `HttpOnly`, `SameSite=Strict` session cookie. A mismatch renders the login page again with status 401. Sessions live in the server's memory, so a restart signs everyone out. The token is not logged and not stored in the catalog. With no token configured, the catalog routes are open, which is allowed only on the default host. `--port 0` picks a free port, and the startup line prints it.
 
-Core v1 opens the catalog read-only. Handlers are GET routes and return HTML. HTMX requests return a template partial.
+Core v1 opens the catalog read-only, once per request, on a blocking thread, and runs the same tree check as `bpm query`. A catalog that is missing, foreign, or at another schema version is refused before the server binds.
+
+### Pages and the HTMX seam
+
+The first draft is a traditional multi-page app with no JavaScript. Every route is a GET that returns a whole page. Pages link to each other with plain hrefs, and search and pagination are GET forms and links, so every view is a URL that can be bookmarked or shared. Paged tables show 100 rows, and the library reads details only for those rows.
+
+Each page renders its `<main>` content as its own template, and `layout.html` wraps it. The handler also declares the fragments inside that content which can be swapped on their own: `results` on search, and `children` and `files` on an entity page. In the full page these are elements with those ids. The response depends on two request headers:
+
+| Request | Response |
+| --- | --- |
+| No `HX-Request`, or `HX-Boosted: true` | The whole page |
+| `HX-Request: true` and `HX-Target` names a declared fragment | That fragment only |
+| `HX-Request: true`, any other target | The `<main>` content without the layout |
+
+Adding HTMX is therefore additive. Vendor `htmx.min.js` under `assets/vendor/`, load it from `layout.html`, then add attributes: `hx-boost` on the body, `hx-get` and `hx-target="#results"` on the search form, and `hx-target` on pager links. The handlers and the URLs do not change, and the pages keep working with JavaScript off. The Content Security Policy already allows scripts from the server's own origin and nothing else, so a vendored script fits it and inline scripts stay blocked.
+
+Every response carries `Content-Security-Policy: default-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-store`, because the pages show catalog contents.
 
 | Route | Page |
 | --- | --- |
@@ -509,11 +525,15 @@ Core v1 opens the catalog read-only. Handlers are GET routes and return HTML. HT
 | `GET /login` | Token form, only when a token is configured |
 | `GET /tree`, `GET /entities/{id}` | Tree and entity, read-only |
 | `GET /files/{id}` | File detail: id, fingerprint, digests, locations, drift, and links. Derived-from waits for PRD §4.7 |
-| `GET /search` | Query form and results partial. Filter spelling is the PRD §4.8 sketch |
+| `GET /search` | Query form and results. Filter spelling is the PRD §4.8 sketch. Every filter is a query parameter: `kind`, `under`, `where` (repeatable), `type`, `role`, `unlinked`, `drift` (repeatable), `digest`, `page`. Metadata selectors on files wait for file metadata |
+| `POST /login` | Token check. Writes nothing to the catalog |
+| `GET /assets/app.css` | The stylesheet, embedded in the binary |
+
+The home page is `bpm query summary`. It does a few whole-table reads and takes about 1.7 s on the scenario 31 catalog of 1,000,000 files. Caching the summary between catalog changes is a later option. Every other page takes under 0.4 s there.
 
 Core v2 is the read-write UI. Its routes and behavior are TBD. v1 does not register POST handlers that mutate the catalog, including metadata edits, acknowledge, ingest, scan, and manifest build. The login form may POST the token. That request does not write the catalog.
 
-Assets are the files committed under `assets/vendor/`: the HTMX runtime, the compiled Tailwind and DaisyUI stylesheet, and any other JS or CSS the pages use. The binary embeds those copies with `rust-embed` or `include_bytes!`. A build does not download them. Regenerating the stylesheet is optional, and the new file is committed back. Templates are Askama and compiled into the binary.
+The first draft's only asset is `assets/app.css`, a small hand-written stylesheet with no build step. The binary embeds it with `include_str!`. Third-party front-end files, when they are added, are committed under `assets/vendor/` and embedded the same way, and a build does not download them: the HTMX runtime, and a compiled Tailwind and DaisyUI stylesheet if the UI adopts one. Templates are Askama, under `templates/`, and compiled into the binary. They escape every value, and display formatting (sizes, counts, labels) happens in the handlers, not in the templates.
 
 A startup log line states the bind address. It does not state the token.
 

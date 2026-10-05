@@ -11,16 +11,20 @@ name = "bpm"
 path = "src/main.rs"
 
 [dependencies]
+askama = "0.16"
+axum = "0.8"
 blake3 = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+form_urlencoded = "1"
 globset = "0.4"
 md-5 = "0.11"
 rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
 serde_json = "1"
 thiserror = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal"] }
 toml = "1"
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]

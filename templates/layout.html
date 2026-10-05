@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}{% if !label.is_empty() %} · {{ label }}{% endif %} · bpm</title>
+<link rel="stylesheet" href="/assets/app.css">
+{#- HTMX, when it is added, is vendored under /assets/vendor/ and loaded here. #}
+</head>
+<body>
+<header>
+  <nav>
+    <a href="/" class="brand">bpm</a>
+    {%- if !label.is_empty() %} <span class="catalog">{{ label }}</span>{% endif %}
+    <a href="/">Home</a>
+    <a href="/tree">Tree</a>
+    <a href="/search">Search</a>
+  </nav>
+  <p class="readonly">Read-only. Changes are made with the <code>bpm</code> command line.</p>
+</header>
+<main id="main">
+{{ main|safe }}
+</main>
+</body>
+</html>

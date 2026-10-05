@@ -15,13 +15,17 @@ use std::time::Duration;
 use chrono::Utc;
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior, ffi, params};
+use rusqlite::{
+    Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, ffi,
+    params,
+};
 use uuid::Uuid;
 
 use crate::error::Error;
 use crate::migrate::{self, SchemaState};
 use crate::model::{
-    Address, EntityRow, NodeType, Selector, parse_address, validate_meta_token, validate_name,
+    Address, EntityRow, FileRow, NodeType, Paged, Selector, Window, parse_address,
+    validate_meta_token, validate_name,
 };
 use crate::perms;
 
@@ -33,6 +37,23 @@ pub use files::{
     ScanScope, ScanTarget, Seen,
 };
 pub use runs::{Run, RunKind, lock_path};
+
+pub struct CatalogInfo {
+    pub path: PathBuf,
+    pub catalog_id: String,
+    pub label: String,
+    pub created_at: String,
+    pub schema_version: String,
+}
+
+pub struct EntityDetail {
+    pub entity: EntityRow,
+    /// From the Program down to the parent. No metadata.
+    pub ancestors: Vec<EntityRow>,
+    pub children: Paged<EntityRow>,
+    /// Files linked to this entity itself, not to its descendants.
+    pub files: Paged<FileRow>,
+}
 
 /// Filters for `bpm query entities`. An absent `under` means the whole catalog.
 pub struct EntityQuery {
@@ -415,6 +436,16 @@ impl Catalog {
     }
 
     pub fn query_entities(&mut self, query: &EntityQuery) -> Result<Vec<EntityRow>, Error> {
+        Ok(self.query_entities_page(query, Window::ALL)?.rows)
+    }
+
+    /// One window of an entity query, in tree order: type, then path, then id.
+    /// Metadata is read only for the rows in the window.
+    pub fn query_entities_page(
+        &mut self,
+        query: &EntityQuery,
+        window: Window,
+    ) -> Result<Paged<EntityRow>, Error> {
         // One read transaction, so the nodes and their metadata are one snapshot.
         let snapshot = self.conn.transaction()?;
         let index = load_index(&snapshot)?;
@@ -439,27 +470,89 @@ impl Catalog {
         if let Some(node_type) = query.node_type {
             ids.retain(|id| index.get(*id).node_type == node_type);
         }
-        let mut rows = ids
+        let total = ids.len();
+        let rows = window
+            .apply(sorted_rows(&index, ids)?)
             .into_iter()
-            .map(|id| {
-                let node = index.get(id);
-                Ok(EntityRow {
-                    node_type: node.node_type,
-                    id: node.id,
-                    path: path_of(node, &index)?,
-                    name: node.name.clone(),
-                    metadata: metadata_of(&snapshot, node.node_type, node.id)?,
-                })
+            .map(|mut row| {
+                row.metadata = metadata_of(&snapshot, row.node_type, row.id)?;
+                Ok(row)
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        rows.sort_by(|a, b| {
-            a.node_type
-                .rank()
-                .cmp(&b.node_type.rank())
-                .then_with(|| a.path.cmp(&b.path))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        Ok(rows)
+        Ok(Paged { total, rows })
+    }
+
+    /// One entity with its metadata, its ancestors from the Program down, one
+    /// window of its children, and one window of the files linked to it
+    /// directly.
+    pub fn entity_detail(
+        &mut self,
+        target: &str,
+        children: Window,
+        files: Window,
+    ) -> Result<EntityDetail, Error> {
+        let snapshot = self.conn.transaction()?;
+        let index = load_index(&snapshot)?;
+        let node = resolve_one(&snapshot, &index, target)?;
+        let mut ancestors = Vec::new();
+        let mut parent = node.parent_id;
+        while let Some(id) = parent {
+            let Some(up) = index.lookup(id) else {
+                return Err(Error::Inconsistent(format!(
+                    "{} {} has no parent",
+                    node.node_type.slug(),
+                    node.id
+                )));
+            };
+            ancestors.push(id);
+            parent = up.parent_id;
+        }
+        ancestors.reverse();
+        let ancestors = sorted_rows(&index, ancestors)?;
+        let mut entity = sorted_rows(&index, vec![node.id])?.remove(0);
+        entity.metadata = metadata_of(&snapshot, node.node_type, node.id)?;
+        let child_ids = index.children.get(&node.id).cloned().unwrap_or_default();
+        let child_total = child_ids.len();
+        let child_rows = children
+            .apply(sorted_rows(&index, child_ids)?)
+            .into_iter()
+            .map(|mut row| {
+                row.metadata = metadata_of(&snapshot, row.node_type, row.id)?;
+                Ok(row)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let files = files::linked_files(&snapshot, node.node_type, node.id, files)?;
+        Ok(EntityDetail {
+            entity,
+            ancestors,
+            children: Paged {
+                total: child_total,
+                rows: child_rows,
+            },
+            files,
+        })
+    }
+
+    /// The catalog's identity, as `catalog_meta` records it.
+    pub fn info(&self) -> Result<CatalogInfo, Error> {
+        let get = |key: &str| -> Result<String, Error> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT value FROM catalog_meta WHERE key = ?",
+                    [key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .unwrap_or_default())
+        };
+        Ok(CatalogInfo {
+            path: self.path.clone(),
+            catalog_id: get("catalog_id")?,
+            label: get("label")?,
+            created_at: get("created_at")?,
+            schema_version: get("schema_version")?,
+        })
     }
 
     /// Run one statement. A read-only catalog rejects any write in the engine.
@@ -1154,6 +1247,32 @@ fn metadata_of(
         })?
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     Ok(pairs)
+}
+
+/// Rows for these entities without metadata, in tree order: type, then path,
+/// then id.
+fn sorted_rows(index: &Index, ids: Vec<Uuid>) -> Result<Vec<EntityRow>, Error> {
+    let mut rows = ids
+        .into_iter()
+        .map(|id| {
+            let node = index.get(id);
+            Ok(EntityRow {
+                node_type: node.node_type,
+                id: node.id,
+                path: path_of(node, index)?,
+                name: node.name.clone(),
+                metadata: BTreeMap::new(),
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    rows.sort_by(|a, b| {
+        a.node_type
+            .rank()
+            .cmp(&b.node_type.rank())
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(rows)
 }
 
 fn collect_descendants(id: Uuid, index: &Index, out: &mut Vec<Uuid>) {

@@ -17,7 +17,8 @@ use super::{
 };
 use crate::error::Error;
 use crate::model::{
-    DigestRow, Drift, FileRef, FileRow, Fingerprint, LinkRow, LocationRow, NodeType, POSIX,
+    DigestRow, Drift, FileRef, FileRow, Fingerprint, LinkRow, LocationRow, NodeType, POSIX, Paged,
+    Summary, Window,
 };
 
 /// One path as a command saw it: where, and what stat said.
@@ -653,6 +654,16 @@ impl Catalog {
     }
 
     pub fn query_files(&mut self, query: &FileQuery) -> Result<Vec<FileRow>, Error> {
+        Ok(self.query_files_page(query, Window::ALL)?.rows)
+    }
+
+    /// One window of a file query, in file-id order. Details are read only for
+    /// the files in the window.
+    pub fn query_files_page(
+        &mut self,
+        query: &FileQuery,
+        window: Window,
+    ) -> Result<Paged<FileRow>, Error> {
         // One read transaction, so the ids and their details are one snapshot.
         let snapshot = self.conn.transaction()?;
         let mut clauses = Vec::new();
@@ -728,12 +739,141 @@ impl Catalog {
             stmt.query_map(params_from_iter(values), |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let rows = load_files(&snapshot, &ids)?;
+        let total = ids.len();
+        let rows = load_files(&snapshot, &window.apply(ids))?;
         if query.under.is_some() {
             snapshot.execute("DROP TABLE IF EXISTS temp.bpm_under", [])?;
         }
-        Ok(rows)
+        Ok(Paged { total, rows })
     }
+
+    /// Counts for the home page and `bpm query summary`. Each figure is one
+    /// grouped read, so the cost is a few table scans.
+    pub fn summary(&mut self) -> Result<Summary, Error> {
+        let snapshot = self.conn.transaction()?;
+        let mut summary = Summary::default();
+        for node_type in NodeType::ALL {
+            let count: i64 = snapshot.query_row(
+                "SELECT COUNT(*) FROM entities WHERE node_type = ?",
+                [node_type.slug()],
+                |row| row.get(0),
+            )?;
+            summary.entities.push((node_type, count));
+        }
+        (summary.files, summary.bytes) = snapshot.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM files",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        summary.unlinked = snapshot.query_row(
+            "SELECT COUNT(*) FROM files f
+             WHERE NOT EXISTS (SELECT 1 FROM file_links l WHERE l.file_id = f.id)",
+            [],
+            |row| row.get(0),
+        )?;
+        {
+            // Grouping links by (file_id, node_type) follows the links key, so
+            // it needs no sort; a DISTINCT over the join took twice as long.
+            let mut stmt = snapshot.prepare(
+                "SELECT t.node_type, COUNT(*), COALESCE(SUM(f.size_bytes), 0)
+                 FROM (SELECT file_id, node_type FROM file_links GROUP BY file_id, node_type) t
+                 JOIN files f ON f.id = t.file_id
+                 GROUP BY t.node_type",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                if let Some(node_type) = NodeType::parse(&row.get::<_, String>(0)?) {
+                    summary
+                        .linked_by_type
+                        .push((node_type, row.get(1)?, row.get(2)?));
+                }
+            }
+            summary
+                .linked_by_type
+                .sort_by_key(|(node_type, _, _)| node_type.rank());
+        }
+        {
+            // One pass over the locations for both the backends and the drift
+            // states, which come from the columns.
+            let mut counts = std::collections::BTreeMap::new();
+            let mut backends = std::collections::BTreeMap::new();
+            let mut stmt = snapshot.prepare(
+                "SELECT backend, presence, stat_state, digest_state, COUNT(*) FROM file_locations
+                 GROUP BY backend, presence, stat_state, digest_state",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let n: i64 = row.get(4)?;
+                *backends.entry(row.get::<_, String>(0)?).or_insert(0) += n;
+                for state in Drift::of(
+                    &row.get::<_, String>(1)?,
+                    &row.get::<_, String>(2)?,
+                    &row.get::<_, String>(3)?,
+                ) {
+                    *counts.entry(state).or_insert(0) += n;
+                }
+            }
+            summary.locations_by_backend = backends.into_iter().collect();
+            summary.drift = Drift::ALL
+                .into_iter()
+                .map(|state| (state, counts.get(&state).copied().unwrap_or(0)))
+                .collect();
+        }
+        summary.sample_kind = grouped(
+            &snapshot,
+            "SELECT value, COUNT(*) FROM entity_metadata
+             WHERE key = 'sample_kind' AND node_type = 'sample' GROUP BY value ORDER BY value",
+        )?;
+        summary.assay = grouped(
+            &snapshot,
+            "SELECT value, COUNT(*) FROM entity_metadata
+             WHERE key = 'assay' GROUP BY value ORDER BY value",
+        )?;
+        Ok(summary)
+    }
+}
+
+fn grouped(conn: &Connection, sql: &str) -> Result<Vec<(String, i64)>, Error> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// One window of the files linked to one entity itself, in file-id order.
+pub(super) fn linked_files(
+    conn: &Connection,
+    node_type: NodeType,
+    node_id: Uuid,
+    window: Window,
+) -> Result<Paged<FileRow>, Error> {
+    let id = node_id.to_string();
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM file_links WHERE node_type = ? AND node_id = ?",
+        params![node_type.slug(), id],
+        |row| row.get(0),
+    )?;
+    let ids = {
+        let mut stmt = conn.prepare(
+            "SELECT file_id FROM file_links WHERE node_type = ? AND node_id = ?
+             ORDER BY file_id LIMIT ? OFFSET ?",
+        )?;
+        stmt.query_map(
+            params![
+                node_type.slug(),
+                id,
+                i64::try_from(window.limit).unwrap_or(i64::MAX),
+                i64::try_from(window.offset).unwrap_or(i64::MAX)
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(Paged {
+        total: total as usize,
+        rows: load_files(conn, &ids)?,
+    })
 }
 
 /// Columns of `file_locations x` for one operator state, as in the

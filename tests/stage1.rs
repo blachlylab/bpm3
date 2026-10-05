@@ -1579,12 +1579,6 @@ fn later_milestones_are_not_stubbed_as_success() {
     let catalog = home.join("cat.db");
     init(home, &catalog);
     let cat = catalog.to_str().unwrap();
-    let summary = fail(bpm(home, home, &["--catalog", cat, "query", "summary"]));
-    assert!(
-        summary.err.contains("not part of this milestone"),
-        "{}",
-        summary.err
-    );
     let impact = fail(bpm(
         home,
         home,

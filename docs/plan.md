@@ -52,6 +52,8 @@ PRD slice D, Core v1. Scenario 29.
 - HTMX, CSS, and any other front-end files are vendored under `assets/vendor/` and embedded.
 - Search uses the same query sketch as the CLI.
 
+The first draft is built: a multi-page app with no JavaScript and a hand-written stylesheet, with scenario 29 in `tests/stage4.rs`. Responses already honor `HX-Request` and `HX-Target`, so HTMX is an additive step. See the architecture overview §8.
+
 Read-write pages are Core v2. They have no stage until that UI is specified.
 
 ## 5. Import, manifests, and materialize

@@ -12,5 +12,6 @@ pub mod migrate;
 pub mod model;
 pub mod perms;
 pub mod query;
+pub mod web;
 
 pub use error::Error;

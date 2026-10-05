@@ -1,0 +1,70 @@
+<h1>{{ info.label }}</h1>
+<table class="facts">
+  <tr><th>Catalog file</th><td><code>{{ info.path }}</code></td></tr>
+  <tr><th>Catalog id</th><td><code>{{ info.catalog_id }}</code></td></tr>
+  <tr><th>Created</th><td>{{ info.created_at }}</td></tr>
+  <tr><th>Schema version</th><td>{{ info.schema_version }}</td></tr>
+</table>
+
+<h2>Entities</h2>
+<table>
+  <thead><tr><th>Type</th><th class="num">Count</th></tr></thead>
+  <tbody>
+  {%- for row in entities %}
+    <tr><td><a href="{{ row.href }}">{{ row.name }}</a></td><td class="num">{{ row.count }}</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+
+<h2>Files</h2>
+<table>
+  <thead><tr><th></th><th class="num">Files</th><th class="num">Bytes</th></tr></thead>
+  <tbody>
+    <tr><td><a href="/search?kind=files">All files</a></td><td class="num">{{ files }}</td><td class="num" title="{{ bytes_exact }} bytes">{{ bytes }}</td></tr>
+    <tr><td><a href="/search?kind=files&amp;unlinked=1">Unlinked</a></td><td class="num">{{ unlinked }}</td><td></td></tr>
+  {%- for row in linked %}
+    <tr><td>Linked to a {{ row.name }}</td><td class="num">{{ row.count }}</td><td class="num" title="{{ row.bytes_exact }} bytes">{{ row.bytes }}</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+
+<h2>Locations</h2>
+<table>
+  <thead><tr><th>Drift state</th><th class="num">Locations</th></tr></thead>
+  <tbody>
+  {%- for row in drift %}
+    <tr><td><a href="{{ row.href }}"><span class="drift drift-{{ row.name }}">{{ row.name }}</span></a></td><td class="num">{{ row.count }}</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+<table>
+  <thead><tr><th>Backend</th><th class="num">Locations</th></tr></thead>
+  <tbody>
+  {%- for row in backends %}
+    <tr><td>{{ row.name }}</td><td class="num">{{ row.count }}</td></tr>
+  {%- else %}
+    <tr><td colspan="2">No locations yet. Add files with <code>bpm ingest</code>.</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+
+{%- if !sample_kind.is_empty() %}
+<h2>Samples by <code>sample_kind</code></h2>
+<table>
+  <tbody>
+  {%- for row in sample_kind %}
+    <tr><td><a href="{{ row.href }}">{{ row.name }}</a></td><td class="num">{{ row.count }}</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+{%- if !assay.is_empty() %}
+<h2>Entities by <code>assay</code></h2>
+<table>
+  <tbody>
+  {%- for row in assay %}
+    <tr><td><a href="{{ row.href }}">{{ row.name }}</a></td><td class="num">{{ row.count }}</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}

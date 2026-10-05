@@ -1,0 +1,19 @@
+{#- A table of files. Expects `rows` and `pager`. -#}
+<p class="count">{{ pager.summary }}</p>
+{%- if !rows.is_empty() %}
+<table>
+  <thead><tr><th>File</th><th class="num">Size</th><th>Drift</th><th>Locations</th><th>Links</th></tr></thead>
+  <tbody>
+  {%- for row in rows %}
+    <tr>
+      <td><a href="{{ row.href }}"><code>{{ row.id }}</code></a></td>
+      <td class="num" title="{{ row.size_exact }} bytes">{{ row.size }}</td>
+      <td>{% for state in row.drift %}<span class="drift drift-{{ state }}">{{ state }}</span> {% endfor %}</td>
+      <td>{% for uri in row.locations %}<code class="uri">{{ uri }}</code>{% if !loop.last %}<br>{% endif %}{% endfor %}</td>
+      <td>{% for link in row.links %}<a href="{{ link.href }}">{{ link.label }}</a> <span class="role">{{ link.role }}</span>{% if !loop.last %}<br>{% endif %}{% endfor %}</td>
+    </tr>
+  {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+{%- include "pager.html" %}

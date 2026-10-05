@@ -1,0 +1,18 @@
+<h1>Tree</h1>
+<p>Programs and their Projects. Open a Project to see its Cases and the rest of the tree below it.</p>
+{%- for program in programs %}
+<section class="program">
+  <h2><a href="{{ program.href }}">{{ program.label }}</a></h2>
+  {%- if program.projects.is_empty() %}
+  <p class="muted">No Projects.</p>
+  {%- else %}
+  <ul>
+    {%- for project in program.projects %}
+    <li><a href="{{ project.href }}">{{ project.label }}</a></li>
+    {%- endfor %}
+  </ul>
+  {%- endif %}
+</section>
+{%- else %}
+<p>No Programs yet. Create one with <code>bpm create program --name NAME</code>.</p>
+{%- endfor %}

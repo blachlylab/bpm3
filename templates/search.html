@@ -1,0 +1,63 @@
+<h1>Search</h1>
+<p>The same filters as <code>bpm query</code>. A selector is <code>key:value</code>, <code>key:</code> (the key is present), or <code>:value</code> (the value is on any key). All selectors must match.</p>
+{#- method="get": a search is a URL, so it can be bookmarked, and the form
+    works without JavaScript. hx-get on this form can later swap #results. #}
+<form method="get" action="/search" class="search">
+  <fieldset>
+    <legend>Find</legend>
+    <div class="choices">
+      <label><input type="radio" name="kind" value="entities"{% if form.kind == "entities" %} checked{% endif %}> Entities</label>
+      <label><input type="radio" name="kind" value="files"{% if form.kind == "files" %} checked{% endif %}> Files</label>
+    </div>
+  </fieldset>
+  <div class="field">
+    <label for="under">Under</label>
+    <input id="under" name="under" value="{{ form.under }}" placeholder="/Program/Project, a UUID, or a metadata path">
+  </div>
+  <div class="field">
+    <label for="where">Metadata</label>
+    <div class="stack">
+      {%- for selector in form.wheres %}
+      <input{% if loop.first %} id="where"{% endif %} name="where" value="{{ selector }}" placeholder="key:value">
+      {%- endfor %}
+    </div>
+  </div>
+  <fieldset>
+    <legend>Entities only</legend>
+    <div class="field">
+      <label for="type">Type</label>
+      <select id="type" name="type">
+        <option value="">Any</option>
+        {%- for (slug, label, selected) in form.types %}
+        <option value="{{ slug }}"{% if selected %} selected{% endif %}>{{ label }}</option>
+        {%- endfor %}
+      </select>
+    </div>
+  </fieldset>
+  <fieldset>
+    <legend>Files only</legend>
+    <div class="field">
+      <label for="role">Link role</label>
+      <input id="role" name="role" value="{{ form.role }}">
+    </div>
+    <div class="field">
+      <label for="digest">Digest</label>
+      <input id="digest" name="digest" value="{{ form.digest }}" placeholder="blake3:hex">
+    </div>
+    <div class="choices">
+      <label><input type="checkbox" name="unlinked" value="1"{% if form.unlinked %} checked{% endif %}> Unlinked only</label>
+    </div>
+    <fieldset>
+      <legend>Drift</legend>
+      <div class="choices">
+        {%- for (slug, checked) in form.drift %}
+        <label><input type="checkbox" name="drift" value="{{ slug }}"{% if checked %} checked{% endif %}> {{ slug }}</label>
+        {%- endfor %}
+      </div>
+    </fieldset>
+  </fieldset>
+  <button type="submit">Search</button>
+</form>
+<section id="results">
+{{ results|safe }}
+</section>

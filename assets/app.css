@@ -1,0 +1,74 @@
+/* bpm serve. Plain, readable, no build step. */
+:root {
+  --fg: #1d1d1f;
+  --muted: #6e6e73;
+  --line: #d2d2d7;
+  --bg: #ffffff;
+  --band: #f5f5f7;
+  --link: #0a58ca;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6e6e6;
+    --muted: #9a9aa0;
+    --line: #3a3a3c;
+    --bg: #161618;
+    --band: #222225;
+    --link: #6cb6ff;
+    --ok: #57ab5a;
+    --warn: #c69026;
+    --bad: #e5534b;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+header { background: var(--band); border-bottom: 1px solid var(--line); padding: 0.6rem 1rem; }
+header nav { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; }
+header .brand { font-weight: 700; }
+header .catalog { color: var(--muted); }
+header .readonly { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.85rem; }
+main { padding: 1rem; max-width: 80rem; }
+a { color: var(--link); }
+h1 { font-size: 1.5rem; margin: 0.5rem 0 1rem; overflow-wrap: anywhere; }
+h2 { font-size: 1.15rem; margin: 1.75rem 0 0.5rem; }
+code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+table { border-collapse: collapse; margin: 0.5rem 0; }
+th, td { text-align: left; vertical-align: top; padding: 0.3rem 0.75rem 0.3rem 0; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; }
+.facts th { color: var(--muted); font-weight: 500; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.muted, .count { color: var(--muted); }
+.error { color: var(--bad); }
+.role { color: var(--muted); }
+.pair { white-space: nowrap; margin-right: 0.5rem; }
+.pair .key { color: var(--muted); }
+.drift { display: inline-block; padding: 0 0.35rem; border: 1px solid currentColor; border-radius: 0.25rem; font-size: 0.85em; }
+.drift-ok { color: var(--ok); }
+.drift-unverified { color: var(--muted); }
+.drift-stat_changed { color: var(--warn); }
+.drift-missing, .drift-digest_mismatch { color: var(--bad); }
+.crumbs { color: var(--muted); overflow-wrap: anywhere; }
+.pager { display: flex; gap: 1rem; margin: 0.5rem 0; }
+/* The search form stacks: one field per row, label beside the input when
+   there is room and above it when there is not. No grid, so no row can push
+   the form wider than its container. */
+form.search { max-width: 40rem; }
+/* A fieldset's default minimum width is its content's min-content width;
+   zero lets it shrink with the page. */
+form.search fieldset { min-inline-size: 0; margin: 0 0 0.75rem; padding: 0.4rem 0.75rem 0.6rem; border: 1px solid var(--line); }
+form.search fieldset fieldset { margin: 0.4rem 0 0; }
+form.search .field { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.75rem; margin: 0.4rem 0; }
+form.search .field > label { flex: 0 0 6rem; color: var(--muted); }
+form.search .field > input, form.search .field > select, form.search .stack { flex: 1 1 14rem; min-width: 0; }
+form.search .stack { display: flex; flex-direction: column; gap: 0.3rem; }
+form.search .choices { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+form.search .choices label { white-space: nowrap; }
+input, select, button { font: inherit; padding: 0.25rem 0.4rem; }

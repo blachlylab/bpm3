@@ -1,0 +1,34 @@
+<nav class="crumbs" aria-label="Ancestors">
+  {%- for crumb in ancestors %}<a href="{{ crumb.href }}">{{ crumb.label }}</a> / {% endfor %}<span>{{ entity.label }}</span>
+</nav>
+<h1>{{ entity.type_label }} {{ entity.label }}</h1>
+<table class="facts">
+  <tr><th>Type</th><td>{{ entity.type_label }}</td></tr>
+  <tr><th>Id</th><td><code>{{ entity.id }}</code></td></tr>
+  {%- if let Some(path) = path %}<tr><th>Path</th><td><code>{{ path }}</code></td></tr>{% endif %}
+</table>
+
+<h2>Metadata</h2>
+{%- if metadata.is_empty() %}
+<p class="muted">No metadata.</p>
+{%- else %}
+<table>
+  <thead><tr><th>Key</th><th>Value</th></tr></thead>
+  <tbody>
+  {%- for (key, value, href) in metadata %}
+    <tr><td><code>{{ key }}</code></td><td><a href="{{ href }}" title="Entities with {{ key }}:{{ value }}">{{ value }}</a></td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+
+<h2>Children</h2>
+<section id="children">
+{{ children|safe }}
+</section>
+
+<h2>Files linked here</h2>
+<p><a href="{{ files_under_href }}">All files linked to this entity or anything below it</a></p>
+<section id="files">
+{{ files|safe }}
+</section>

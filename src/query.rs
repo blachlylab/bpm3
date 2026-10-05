@@ -1,6 +1,6 @@
 //! Rendering for `bpm query` and `bpm sql`. No database access.
 
-use crate::model::{EntityRow, FileRow};
+use crate::model::{EntityRow, FileRow, Summary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderFormat {
@@ -80,6 +80,61 @@ pub fn render_files(rows: &[FileRow], format: RenderFormat) -> String {
                             "node_id": link.node_id.to_string(),
                             "role": link.role,
                         })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".into())
+            )
+        }
+    }
+}
+
+/// `bpm query summary`: one `section  name  count  bytes` row per figure.
+pub fn render_summary(summary: &Summary, format: RenderFormat) -> String {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut push = |section: &str, name: &str, count: i64, bytes: Option<i64>| {
+        rows.push(vec![
+            section.to_string(),
+            name.to_string(),
+            count.to_string(),
+            bytes.map(|bytes| bytes.to_string()).unwrap_or_default(),
+        ]);
+    };
+    for (node_type, count) in &summary.entities {
+        push("entities", node_type.slug(), *count, None);
+    }
+    push("files", "all", summary.files, Some(summary.bytes));
+    push("files", "unlinked", summary.unlinked, None);
+    for (node_type, count, bytes) in &summary.linked_by_type {
+        push("linked_to", node_type.slug(), *count, Some(*bytes));
+    }
+    for (backend, count) in &summary.locations_by_backend {
+        push("locations", backend, *count, None);
+    }
+    for (state, count) in &summary.drift {
+        push("drift", state.slug(), *count, None);
+    }
+    for (value, count) in &summary.sample_kind {
+        push("sample_kind", value, *count, None);
+    }
+    for (value, count) in &summary.assay {
+        push("assay", value, *count, None);
+    }
+    const HEADERS: [&str; 4] = ["section", "name", "count", "bytes"];
+    match format {
+        RenderFormat::Table => render_table(&HEADERS, &rows),
+        RenderFormat::Csv => render_csv(&HEADERS, &rows),
+        RenderFormat::Json => {
+            let items: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "section": row[0],
+                        "name": row[1],
+                        "count": row[2].parse::<i64>().unwrap_or(0),
+                        "bytes": row[3].parse::<i64>().ok(),
                     })
                 })
                 .collect();

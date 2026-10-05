@@ -1,0 +1,71 @@
+<h1>File <code>{{ id }}</code></h1>
+<table class="facts">
+  <tr><th>Size</th><td title="{{ size_exact }} bytes">{{ size }}</td></tr>
+  <tr><th>Modified</th><td>{{ mtime }}</td></tr>
+  <tr><th>Fingerprint</th><td>{% if let Some((scheme, hex)) = fingerprint %}<code>{{ scheme }}:{{ hex }}</code>{% else %}<span class="muted">none</span>{% endif %}</td></tr>
+  <tr><th>Drift</th><td>{% for state in drift %}<span class="drift drift-{{ state }}">{{ state }}</span> {% endfor %}</td></tr>
+</table>
+
+<h2>Current digests</h2>
+{%- if current.is_empty() %}
+<p class="muted">No digest yet. <code>bpm scan</code> stores BLAKE3 when it reads the bytes.</p>
+{%- else %}
+<table>
+  <thead><tr><th>Digest</th><th>Source</th><th class="num">Generation</th></tr></thead>
+  <tbody>
+  {%- for digest in current %}
+    <tr><td><code class="digest">{{ digest.wire }}</code></td><td>{{ digest.source }}</td><td class="num">{{ digest.generation }}</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+
+<h2>Locations</h2>
+<table>
+  <thead><tr><th>Backend</th><th>Location</th><th>Drift</th><th>Presence</th><th>Stat</th><th>Digest</th><th>Last seen</th></tr></thead>
+  <tbody>
+  {%- for location in locations %}
+    <tr>
+      <td>{{ location.backend }}</td>
+      <td><code class="uri">{{ location.uri }}</code></td>
+      <td>{% for state in location.drift %}<span class="drift drift-{{ state }}">{{ state }}</span> {% endfor %}</td>
+      <td>{{ location.presence }}</td>
+      <td>{{ location.stat_state }}</td>
+      <td>{{ location.digest_state }}</td>
+      <td>{{ location.last_seen_at }}</td>
+    </tr>
+  {%- else %}
+    <tr><td colspan="7">No locations.</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+
+<h2>Links</h2>
+{%- if links.is_empty() %}
+<p class="muted">Unlinked. Attach it with <code>bpm link {{ id }} ENTITY --role ROLE</code>.</p>
+{%- else %}
+<table>
+  <thead><tr><th>Entity</th><th>Role</th></tr></thead>
+  <tbody>
+  {%- for link in links %}
+    <tr><td><a href="{{ link.href }}">{{ link.label }}</a></td><td>{{ link.role }}</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+
+<h2>Digest history</h2>
+<section id="history">
+{%- if history.is_empty() %}
+<p class="muted">No digests.</p>
+{%- else %}
+<table>
+  <thead><tr><th class="num">Generation</th><th>Digest</th><th>Source</th><th>Current</th></tr></thead>
+  <tbody>
+  {%- for digest in history %}
+    <tr><td class="num">{{ digest.generation }}</td><td><code class="digest">{{ digest.wire }}</code></td><td>{{ digest.source }}</td><td>{% if digest.current %}yes{% else %}no{% endif %}</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+</section>
