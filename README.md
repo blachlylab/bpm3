@@ -167,3 +167,24 @@ ingest 01a1…: 47 files seen, 44 new files, 47 new locations, 3 copies, 0 alrea
 | errors | Paths that could not be recorded. They are also printed above the summary. |
 
 The paths themselves stay in the catalog. `bpm query files` shows the locations of a file. A second ingest of a directory already in the catalog reports `already recorded` for every path and `0 copies`. A path whose fingerprint matched but whose bytes could not be read is a `possible duplicate`, printed on its own line, and is not merged. Errors are printed the same way. A broken symbolic link is not one of those errors: stderr gets a count (`bpm: 2 broken symbolic links`) and the run exits 0. The walk tried to follow it, and a missing target does not say whether it was a file or a directory.
+
+## Linking files
+
+`bpm link` attaches ingested files to entities. One file:
+
+```
+bpm link --to /CLL/WES-relapse --role document /data/irb/approval.pdf
+```
+
+A directory of FASTQs, creating each subject's Case, Sample, and one Raw Data node per file on the way:
+
+```
+bpm link --to '/CLL/WES-relapse/case[subject_id:{1}]?/sample?/raw_data[read:{2}]+' \
+  --match '([A-Za-z0-9]+)_(R[12])\.fq\.gz' --role data --expect sample=2 /data/run42
+```
+
+`--to` is an address followed by typed steps, one level each. In a step, `[key:value]` selects the node and is written onto it if it is created. No suffix means the node must exist, `?` uses it or creates it, and `+` creates a new one. `{1}` and `{2}` are the pattern's groups. A mapping table (`--table samples.tsv --join 'barcode={1}'`) supplies placeholders when the file name does not carry the id.
+
+Every run prints its plan first. `-n` stops there. A run that creates entities asks before it writes, or takes `--yes` without a terminal. A run writes everything or nothing, and it prints `link run <id>`. `bpm undo <id>` reverses that run, and `bpm undo --list` lists runs. `bpm unlink` takes the same `--to` and `--match`.
+
+The full reference, with the checks and recipes for BAMs, FASTQs, and two assays from one sample, is [docs/guide/link.md](docs/guide/link.md).

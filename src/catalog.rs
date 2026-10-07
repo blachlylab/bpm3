@@ -30,12 +30,14 @@ use crate::model::{
 use crate::perms;
 
 mod files;
+mod link;
 mod runs;
 
 pub use files::{
     AckObservation, AckOutcome, Candidate, FileQuery, IngestApplied, IngestEntry, ScanOutcome,
     ScanScope, ScanTarget, Seen,
 };
+pub use link::{Action, LinkOptions, LinkPlan, LinkRunRow, PlannedLink, UndoPlan};
 pub use runs::{Run, RunKind, lock_path};
 
 pub struct CatalogInfo {
@@ -1015,14 +1017,19 @@ fn checks() -> Vec<Check> {
             predicate: format!("NOT EXISTS (SELECT 1 FROM files WHERE files.id = {table}.file_id)"),
         });
     }
-    for (table, runs) in [
-        ("ingest_errors", "ingest_runs"),
-        ("scan_errors", "scan_runs"),
+    for (table, runs, key) in [
+        ("ingest_errors", "ingest_runs", "run_id || ' ' || uri"),
+        ("scan_errors", "scan_runs", "run_id || ' ' || uri"),
+        (
+            "link_role_changes",
+            "link_runs",
+            "run_id || ' ' || file_id || ' ' || node_type || ' ' || node_id",
+        ),
     ] {
         checks.push(Check {
             table,
             issue: "run is missing",
-            key: "run_id || ' ' || uri",
+            key,
             predicate: format!(
                 "NOT EXISTS (SELECT 1 FROM {runs} WHERE {runs}.id = {table}.run_id)"
             ),

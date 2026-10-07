@@ -136,6 +136,9 @@ pub fn render_summary(summary: &Summary, format: RenderFormat) -> String {
     for (value, count) in &summary.assay {
         push("assay", value, *count, None);
     }
+    for (role, count) in &summary.roles {
+        push("role", role, *count, None);
+    }
     const HEADERS: [&str; 4] = ["section", "name", "count", "bytes"];
     match format {
         RenderFormat::Table => render_table(&HEADERS, &rows),

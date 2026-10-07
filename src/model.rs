@@ -137,7 +137,7 @@ pub fn validate_meta_token(token: &str) -> Result<(), ModelError> {
 }
 
 /// `key:value`, `key:` (key present), or `:value` (value on any key).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Selector {
     pub key: Option<String>,
     pub value: Option<String>,
@@ -457,6 +457,8 @@ pub struct Summary {
     pub drift: Vec<(Drift, i64)>,
     pub sample_kind: Vec<(String, i64)>,
     pub assay: Vec<(String, i64)>,
+    /// Links by role, so a second spelling of a role is easy to spot.
+    pub roles: Vec<(String, i64)>,
 }
 
 #[cfg(test)]

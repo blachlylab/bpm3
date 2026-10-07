@@ -56,6 +56,16 @@ The first draft is built: a multi-page app with no JavaScript and a hand-written
 
 Read-write pages are Core v2. They have no stage until that UI is specified.
 
+## 4a. Bulk link and undo
+
+Scenarios 33–39, in `tests/link.rs`. [ADR 0002](adr/0002-link-templates.md) is the design, and the [link guide](guide/link.md) is the user reference.
+
+- `bpm link --to TEMPLATE` with typed steps and per-step modes, `--match`, `--match-path`, `--table` and `--join`, `--expect`, the known-role list, and a plan that asks before it creates entities.
+- `bpm unlink` with the same selection, and `bpm undo RUN`.
+- V003 adds `run_id` to links and to the four lower node tables, plus `link_runs`, `link_role_changes`, and `link_roles`.
+
+Deferred from this stage: a report of files on disk under a directory operand that are not in the catalog, and a capture-to-role map.
+
 ## 5. Import, manifests, and materialize
 
 Starts when PRD §4.9 and §4.10 are no longer marked unstable. Scenarios 23, 24, and 26.

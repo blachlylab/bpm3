@@ -778,6 +778,10 @@ impl Catalog {
             "SELECT value, COUNT(*) FROM entity_metadata
              WHERE key = 'assay' GROUP BY value ORDER BY value",
         )?;
+        summary.roles = grouped(
+            &snapshot,
+            "SELECT role, COUNT(*) FROM file_links GROUP BY role ORDER BY role",
+        )?;
         Ok(summary)
     }
 }

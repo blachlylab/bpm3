@@ -31,6 +31,11 @@ pub static MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/V002__file_indexes.sql"),
         rebuilds: false,
     },
+    Migration {
+        version: 3,
+        sql: include_str!("../migrations/V003__link_runs.sql"),
+        rebuilds: false,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,7 +225,7 @@ mod tests {
     #[test]
     fn versions_start_at_one_and_do_not_skip() {
         check_contiguous().unwrap();
-        assert_eq!(latest(), 2);
+        assert_eq!(latest(), 3);
     }
 
     const BASE: Migration = Migration {

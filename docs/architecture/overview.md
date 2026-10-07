@@ -81,7 +81,7 @@ The trait is the reuse seam. Names here are conceptual; Rust signatures can foll
 | Metadata | Set, unset, list, on entities and on files |
 | Observations | Apply one ingest batch: new locations, sizes, mtimes, fingerprints. Consult existing rows only for a duplicate |
 | Digests | `bpm scan` stores BLAKE3 when it reads bytes, or the backend's checksum when that backend supplies one and the body is not downloaded. Acknowledge starts a new generation and clears every current digest for that file |
-| Links | Link, unlink, role. No primary flag |
+| Links | Link, unlink, role. Plan a templated run against a snapshot, apply it in one transaction, undo it by run id. No primary flag |
 | Derivations | **Deferred (PRD §4.7).** Derived-from edges and the walks |
 | Query | **Unstable (PRD §4.8).** Entity, file, and summary queries |
 | Manifest | **Unstable (PRD §4.10).** Canonical body, content id, snapshot id |
@@ -196,6 +196,8 @@ Six tables. Ids follow the UUIDv7 rule above. `created_at` and `updated_at` are 
 | `raw_data` | `sample_id` → `samples.id` | No name column |
 | `analyses` | `raw_data_id` → `raw_data.id` | No name column |
 
+`cases`, `samples`, `raw_data`, and `analyses` also have a nullable `run_id`: the `bpm link` run that created the row, if one did (schema version 3). Programs and Projects are never created by a link and have no such column.
+
 A Sample cannot name a Project: the column `samples.case_id` references `cases` only. Reparent updates that parent column. The foreign key checks the new parent. Rename updates `name` on a Program or Project and does not touch link rows. `--cascade` deletes in one transaction, leaves first, so `ON DELETE RESTRICT` never sees a parent whose children still exist.
 
 A view `entities` is the `UNION ALL` of the six tables, with columns `node_type`, `id`, `parent_id`, and `name` (`name` is null below Project). A filter on `node_type` skips the other branches. The view is not a second store. Catalog reads and ad hoc SQL may use it. Writes go to the typed table. A UUID lookup without a type reads this view, which probes the six primary keys.
@@ -282,9 +284,16 @@ Primary key `(backend, uri)`. A path belongs to one file. When a move is confirm
 | file_id | Foreign key to `files.id` |
 | node_type | Same six names as `entity_metadata` |
 | node_id | UUID in the table `node_type` names. Not a foreign key |
-| role | Text |
+| role | Text. Spelled `[a-z0-9_-]+` when `bpm link` writes it |
+| run_id | The `bpm link` run that added the row, or null. Not a foreign key |
 
 Primary key `(file_id, node_type, node_id)`. An index on `(node_type, node_id)` serves "files on this node" and cascade delete. `files` has no node column. Ingest writes `files` and `file_locations` only. Zero link rows is an unlinked file, which is normal after ingest. Two link rows attach one file id to two nodes. The library checks that `node_id` exists on insert. A delete with link rows still present fails. `--cascade` deletes the descendant nodes, their link rows, and their `entity_metadata` rows, and leaves the file rows. No primary-link column. That flag is undefined until the product gives it behavior.
+
+### link_runs, link_role_changes, link_roles
+
+Schema version 3. `link_runs` has one row per `bpm link` run that wrote something: the argument vector as JSON, `applied_at`, counts of entities, links, and role changes, and `undone_at` once `bpm undo` has reversed it. Every row the run writes uses `applied_at` as its timestamp, so undo can tell metadata the run wrote from a later `bpm meta set`. `link_role_changes` keeps the old and new role of each link a `--set-role` run changed. Its `run_id` is a foreign key to `link_runs`, and `bpm repair` checks it. `link_roles` is the catalog's list of known roles, which `bpm link` checks a role against.
+
+A link run plans against a read transaction, prints the plan, and then plans again inside `BEGIN IMMEDIATE`. It writes only if the second plan is identical to the first, so an operator's answer to the confirmation question never applies to a catalog that has changed. Undo deletes the rows tagged with the run id. It refuses when a created entity has a child, a link, or a metadata row the run did not write, or when a changed role has been changed again.
 
 ### file_derivations
 
@@ -546,7 +555,7 @@ Clap 4 derive parser. The binary name is `bpm`. The subcommands Core implements 
 
 Output goes to stdout. Diagnostics go to stderr. Exit status is `0` on success and non-zero on a rejected command. `bpm ingest` and `bpm scan` also exit non-zero when any path could not be read. The paths they could read are committed first.
 
-`bpm delete` takes an entity, `--location PATH`, or `--file FILE`. A file is named by its id or by one of its location paths. `--file` refuses a file with links unless `--cascade` removes them too. None of these touch bytes on disk. `bpm link FILE ENTITY --role ROLE` and `bpm unlink FILE ENTITY` name the file the same way.
+`bpm delete` takes an entity, `--location PATH`, or `--file FILE`. A file is named by its id or by one of its location paths. `--file` refuses a file with links unless `--cascade` removes them too. None of these touch bytes on disk. `bpm link --to TEMPLATE --role ROLE FILE…` and `bpm unlink --to TEMPLATE FILE…` name a file the same way, and also take a directory, which reaches every catalog location below it. The template grammar is [ADR 0002](../adr/0002-link-templates.md).
 
 `bpm login`, `bpm logout`, and `bpm use` are marked `*` in PRD §4.13. Core does not register them. The token typed into `bpm serve` is not `bpm login`. When a Govern client exists, those commands with no server configured fail with a short message, and they do not report that a login succeeded.
 

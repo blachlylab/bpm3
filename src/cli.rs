@@ -6,11 +6,12 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::catalog::{self, AckOutcome, Catalog, EntityQuery, FileQuery, SqlOutcome};
+use crate::catalog::{self, AckOutcome, Catalog, EntityQuery, FileQuery, LinkOptions, SqlOutcome};
 use crate::error::Error;
 use crate::ingest::filter::{self, FilterSpec, PathFilter};
 use crate::ingest::{self, AckReport, ScanArg};
-use crate::model::{Drift, NodeType, POSIX};
+use crate::link::{Expect, MatchOn, Renderer, Table, Template};
+use crate::model::{Drift, FileRef, NodeType, POSIX};
 use crate::perms;
 use crate::query::{self, RenderFormat};
 
@@ -99,22 +100,65 @@ enum Command {
         #[arg(long)]
         md5: bool,
     },
-    /// Attach a file to an entity with a role. Linking the same pair again replaces the role.
+    /// Link files to entities: one file, or every file a pattern or a table
+    /// places. The guide is docs/guide/link.md.
     Link {
-        /// File id, or the path of one of its locations.
-        file: String,
-        /// Entity path or UUID.
-        entity: String,
-        /// An open string, such as data or index.
+        /// File ids, or catalog locations. A location that is a directory
+        /// reaches every location under it.
+        #[arg(required = true, value_name = "FILE|LOCATION")]
+        operands: Vec<String>,
+        #[command(flatten)]
+        select: LinkSelect,
+        /// The role of every link. Placeholders work here too, such as {role}
+        /// from a --table column.
         #[arg(long)]
         role: String,
+        /// Allow roles that are not on this catalog's list, and add them to it.
+        #[arg(long)]
+        new_role: bool,
+        /// Change the role of a link that already exists.
+        #[arg(long)]
+        set_role: bool,
+        /// Link a file even when it is already linked to a node of the target
+        /// type under the anchor and this run would create a node for it.
+        #[arg(long)]
+        relink: bool,
+        /// Every TYPE node the run touches gets N (or N..M) files. Repeatable.
+        #[arg(long, value_name = "TYPE=N[..M]")]
+        expect: Vec<String>,
+        /// Fail when a file does not match the pattern, or a table row matches no file.
+        #[arg(long)]
+        strict: bool,
+        #[command(flatten)]
+        show: ShowArgs,
+        /// Apply a plan that creates entities without asking.
+        #[arg(short, long)]
+        yes: bool,
     },
-    /// Detach a file from an entity. The file row stays.
+    /// Detach files from entities. The file rows stay. Takes the same
+    /// template as link, and never creates.
     Unlink {
-        /// File id, or the path of one of its locations.
-        file: String,
-        /// Entity path or UUID.
-        entity: String,
+        #[arg(required = true, value_name = "FILE|LOCATION")]
+        operands: Vec<String>,
+        #[command(flatten)]
+        select: LinkSelect,
+        #[command(flatten)]
+        show: ShowArgs,
+    },
+    /// Undo one link run: remove its links and the entities it created, and
+    /// restore roles it changed.
+    Undo {
+        /// The run id `bpm link` printed.
+        #[arg(required_unless_present = "list", conflicts_with = "list")]
+        run: Option<String>,
+        /// List link runs, newest first.
+        #[arg(long)]
+        list: bool,
+        #[command(flatten)]
+        show: ShowArgs,
+        /// Remove entities without asking.
+        #[arg(short, long)]
+        yes: bool,
     },
     /// Set, read, or remove metadata.
     Meta {
@@ -205,6 +249,37 @@ impl FilterArgs {
         };
         PathFilter::new(&spec, global)
     }
+}
+
+#[derive(clap::Args)]
+struct LinkSelect {
+    /// Where each file links: an address, then typed steps such as
+    /// case[subject_id:{1}]?/sample?/raw_data+.
+    #[arg(long, value_name = "TEMPLATE")]
+    to: String,
+    /// A regex that must match a file's whole name. Its groups are {1}, {2},
+    /// and {name}.
+    #[arg(long = "match", value_name = "REGEX", conflicts_with = "match_path")]
+    pattern: Option<String>,
+    /// Like --match, against the path relative to the location operand.
+    #[arg(long, value_name = "REGEX")]
+    match_path: Option<String>,
+    /// A .tsv or .csv mapping table. Its columns become placeholders.
+    #[arg(long, value_name = "FILE", requires = "join")]
+    table: Option<PathBuf>,
+    /// COLUMN=TEMPLATE: each file uses the one row whose COLUMN equals TEMPLATE.
+    #[arg(long, value_name = "COLUMN=TEMPLATE", requires = "table")]
+    join: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct ShowArgs {
+    /// Print the plan and stop.
+    #[arg(short = 'n', long)]
+    dry_run: bool,
+    /// Also print one line per file: action, location, target, role.
+    #[arg(long)]
+    detail: bool,
 }
 
 #[derive(Subcommand)]
@@ -510,15 +585,160 @@ fn dispatch() -> Result<(), Error> {
                 }
             }
         }
-        Command::Link { file, entity, role } => {
-            let file = ingest::file_ref(&file)?;
-            let mut catalog = open_write(cli.catalog.as_deref())?;
-            catalog.link(&file, &entity, &role)?;
+        Command::Link {
+            operands,
+            select,
+            role,
+            new_role,
+            set_role,
+            relink,
+            expect,
+            strict,
+            show,
+            yes,
+        } => {
+            let template = Template::parse(&select.to)?;
+            let mut expects = Vec::with_capacity(expect.len());
+            for raw in &expect {
+                let parsed = Expect::parse(raw)?;
+                if !template
+                    .steps()
+                    .iter()
+                    .any(|(node_type, _)| *node_type == parsed.node_type)
+                {
+                    return Err(Error::Message(format!(
+                        "--expect {raw}: the template has no {} step",
+                        parsed.node_type.slug()
+                    )));
+                }
+                expects.push(parsed);
+            }
+            let options = LinkOptions {
+                expects,
+                new_role,
+                set_role,
+                relink,
+                unlink: false,
+            };
+            run_links(
+                cli.catalog.as_deref(),
+                template,
+                &operands,
+                &select,
+                Some(&role),
+                &options,
+                strict,
+                &show,
+                yes,
+            )?;
         }
-        Command::Unlink { file, entity } => {
-            let file = ingest::file_ref(&file)?;
+        Command::Unlink {
+            operands,
+            select,
+            show,
+        } => {
+            let template = Template::parse(&select.to)?;
+            template.require_existing()?;
+            let options = LinkOptions {
+                unlink: true,
+                ..LinkOptions::default()
+            };
+            run_links(
+                cli.catalog.as_deref(),
+                template,
+                &operands,
+                &select,
+                None,
+                &options,
+                false,
+                &show,
+                true,
+            )?;
+        }
+        Command::Undo {
+            run,
+            list,
+            show,
+            yes,
+        } => {
             let mut catalog = open_write(cli.catalog.as_deref())?;
-            catalog.unlink(&file, &entity)?;
+            if list {
+                let rows: Vec<Vec<String>> = catalog
+                    .link_runs()?
+                    .into_iter()
+                    .map(|row| {
+                        vec![
+                            row.id,
+                            row.applied_at,
+                            row.entities_created.to_string(),
+                            row.links_created.to_string(),
+                            row.roles_changed.to_string(),
+                            row.undone_at.unwrap_or_default(),
+                            command_line(&row.command),
+                        ]
+                    })
+                    .collect();
+                print!(
+                    "{}",
+                    query::render_sql(
+                        &[
+                            "run",
+                            "applied_at",
+                            "entities",
+                            "links",
+                            "roles",
+                            "undone_at",
+                            "command"
+                        ]
+                        .map(String::from),
+                        &rows
+                    )
+                );
+                return Ok(());
+            }
+            let run = run.unwrap_or_default();
+            let plan = catalog.plan_undo(&run)?;
+            if !plan.blockers.is_empty() {
+                return Err(problems(&plan.blockers, "undo"));
+            }
+            let mut by_type: Vec<(NodeType, usize)> = Vec::new();
+            for (node_type, _) in &plan.entities {
+                match by_type.iter_mut().find(|(t, _)| t == node_type) {
+                    Some(entry) => entry.1 += 1,
+                    None => by_type.push((*node_type, 1)),
+                }
+            }
+            println!(
+                "undo {} (applied {}): remove {} links and {} entities{}, restore {} roles",
+                plan.run.id,
+                plan.run.applied_at,
+                plan.links,
+                plan.entities.len(),
+                describe_counts(&by_type),
+                plan.roles.len()
+            );
+            if show.detail {
+                for (node_type, id) in &plan.entities {
+                    println!("delete\t{}\t{id}", node_type.slug());
+                }
+                for (file_id, node_type, node_id, now, restore) in &plan.roles {
+                    println!(
+                        "restore\t{file_id}\t{} {node_id}\t{now} -> {restore}",
+                        node_type.slug()
+                    );
+                }
+            }
+            if show.dry_run {
+                return Ok(());
+            }
+            if !plan.entities.is_empty() && !yes {
+                confirm(&format!(
+                    "this undo deletes {} entities",
+                    plan.entities.len()
+                ))?;
+            }
+            catalog.apply_undo(&run, &plan)?;
+            println!("undone {}", plan.run.id);
         }
         Command::Meta { action } => match action {
             MetaCmd::Set { target, key, value } => {
@@ -651,6 +871,253 @@ fn dispatch() -> Result<(), Error> {
         Command::Login | Command::Logout | Command::Use { .. } => return Err(Error::NoServer),
     }
     Ok(())
+}
+
+/// Plan a link or unlink run, show it, confirm it when it creates entities,
+/// and apply it.
+#[allow(clippy::too_many_arguments)]
+fn run_links(
+    flag: Option<&Path>,
+    template: Template,
+    operands: &[String],
+    select: &LinkSelect,
+    role: Option<&str>,
+    options: &LinkOptions,
+    strict: bool,
+    show: &ShowArgs,
+    yes: bool,
+) -> Result<(), Error> {
+    let pattern = match (&select.pattern, &select.match_path) {
+        (Some(raw), _) => Some((raw.as_str(), MatchOn::Name)),
+        (None, Some(raw)) => Some((raw.as_str(), MatchOn::Path)),
+        (None, None) => None,
+    };
+    let table = match (&select.table, &select.join) {
+        (Some(path), Some(join)) => Some(Table::load(path, join)?),
+        _ => None,
+    };
+    let renderer = Renderer::new(template, role, pattern, table)?;
+    let mut refs = Vec::with_capacity(operands.len());
+    for operand in operands {
+        refs.push(link_operand(operand)?);
+    }
+    // A writer, because link and unlink write; it migrates an older catalog.
+    // Planning still reads a snapshot and does not hold the write lock.
+    let mut catalog = open_write(flag)?;
+    let sources = catalog.link_sources(&refs)?;
+    let rendering = renderer.render(&sources);
+    let plan = catalog.plan_links(&rendering.links, options)?;
+    let verb = if options.unlink { "unlink" } else { "link" };
+
+    let mut errors = rendering.errors.clone();
+    if strict && !options.unlink {
+        errors.extend(
+            rendering
+                .unmatched
+                .iter()
+                .map(|uri| format!("{uri} does not match the pattern (--strict)")),
+        );
+        errors.extend(
+            rendering
+                .unused_rows
+                .iter()
+                .map(|key| format!("table row {key:?} matches no file (--strict)")),
+        );
+    }
+    errors.extend(plan.errors.iter().cloned());
+
+    let matched = rendering.links.len();
+    println!(
+        "{} files reached, {matched} matched, {} not matched",
+        sources
+            .iter()
+            .map(|source| &source.file_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        rendering.unmatched.len()
+    );
+    list("not matched by the pattern", &rendering.unmatched);
+    if rendering.table_rows > 0 {
+        list(
+            &format!("of {} table rows, matched no file", rendering.table_rows),
+            &rendering.unused_rows,
+        );
+    }
+    if options.unlink {
+        println!("unlink {}", plan.count("unlink"));
+    } else {
+        println!(
+            "link {}, already linked {}, role changes {}",
+            plan.count("link"),
+            plan.count("already"),
+            plan.count("set-role"),
+        );
+        if plan.count("skip") > 0 {
+            println!(
+                "skip {}: already linked to a {} under the anchor (--relink links them anyway)",
+                plan.count("skip"),
+                renderer
+                    .template()
+                    .steps()
+                    .last()
+                    .map(|(node_type, _)| node_type.slug())
+                    .unwrap_or("node")
+            );
+        }
+        if plan.created() > 0 {
+            println!(
+                "create {}",
+                plan.creates()
+                    .iter()
+                    .map(|(node_type, count)| format!("{count} {}", node_type.slug()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !plan.new_roles.is_empty() {
+            println!("new roles: {}", plan.new_roles.join(", "));
+        }
+        let mut roles: Vec<(String, usize)> = Vec::new();
+        for link in plan
+            .links
+            .iter()
+            .filter(|link| link.action.slug() == "link")
+        {
+            match roles.iter_mut().find(|(role, _)| *role == link.role) {
+                Some(entry) => entry.1 += 1,
+                None => roles.push((link.role.clone(), 1)),
+            }
+        }
+        if !roles.is_empty() {
+            println!(
+                "roles: {}",
+                roles
+                    .iter()
+                    .map(|(role, count)| format!("{role} {count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    for note in &plan.notes {
+        println!("note: {note}");
+    }
+    if show.detail {
+        for link in &plan.links {
+            println!(
+                "{}\t{}\t{}\t{}",
+                link.action.slug(),
+                link.uri,
+                link.target,
+                link.role
+            );
+        }
+    }
+    if !errors.is_empty() {
+        return Err(problems(&errors, verb));
+    }
+    if matched == 0 {
+        return Err(Error::Message(format!("no files to {verb}")));
+    }
+    if show.dry_run {
+        return Ok(());
+    }
+    if plan.created() > 0 && !yes {
+        confirm(&format!("this run creates {} entities", plan.created()))?;
+    }
+    let command = serde_json::to_string(&std::env::args().collect::<Vec<_>>())
+        .unwrap_or_else(|_| "[]".into());
+    match catalog.apply_links(&rendering.links, options, &plan, &command)? {
+        Some(run) => println!(
+            "link run {run}: {} links, {} entities created, {} roles changed",
+            plan.count("link"),
+            plan.created(),
+            plan.count("set-role")
+        ),
+        None if options.unlink => println!("unlinked {}", plan.count("unlink")),
+        None => println!("nothing to write"),
+    }
+    Ok(())
+}
+
+/// A file id, a local path, or later an object-store URI.
+fn link_operand(raw: &str) -> Result<FileRef, Error> {
+    if let Some((scheme, _)) = raw.split_once("://") {
+        return match scheme {
+            "s3" => Err(Error::NotThisMilestone("an s3 location")),
+            _ => Err(Error::Message(format!(
+                "{raw}: unknown location scheme {scheme}"
+            ))),
+        };
+    }
+    ingest::file_ref(raw)
+}
+
+/// Ask on a terminal. Without one, a run that needs an answer fails.
+fn confirm(what: &str) -> Result<(), Error> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Err(Error::Message(format!(
+            "{what}; pass --yes to apply it without a terminal, or -n to only see the plan"
+        )));
+    }
+    eprint!("bpm: {what}. Apply? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if matches!(answer.trim(), "y" | "Y" | "yes") {
+        Ok(())
+    } else {
+        Err(Error::Message("not applied".into()))
+    }
+}
+
+fn problems(messages: &[String], verb: &str) -> Error {
+    for message in messages.iter().take(LISTED) {
+        eprintln!("bpm: {message}");
+    }
+    if messages.len() > LISTED {
+        eprintln!("bpm: … and {} more", messages.len() - LISTED);
+    }
+    Error::Message(format!(
+        "{} problem(s); nothing was written ({verb})",
+        messages.len()
+    ))
+}
+
+fn list(heading: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    println!("{} {heading}:", items.len());
+    for item in items.iter().take(LISTED) {
+        println!("  {item}");
+    }
+    if items.len() > LISTED {
+        println!("  … and {} more", items.len() - LISTED);
+    }
+}
+
+/// " (500 case, 500 sample)", or "" when empty.
+fn describe_counts(counts: &[(NodeType, usize)]) -> String {
+    if counts.is_empty() {
+        return String::new();
+    }
+    format!(
+        " ({})",
+        counts
+            .iter()
+            .map(|(node_type, count)| format!("{count} {}", node_type.slug()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The recorded argument vector, without the program name.
+fn command_line(json: &str) -> String {
+    serde_json::from_str::<Vec<String>>(json)
+        .map(|args| args.into_iter().skip(1).collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|_| json.to_string())
 }
 
 /// Opens for reading and refuses a catalog whose entity tree is broken. Every

@@ -181,7 +181,7 @@ fn scenario_01_init_modes_and_force() {
         &default,
         "SELECT value FROM catalog_meta WHERE key = 'schema_version'",
     ));
-    assert_eq!(version, "2");
+    assert_eq!(version, "3");
 
     ok(bpm(home, home, &["init", "--force"]));
     let id_after = line(&sql(
@@ -1382,7 +1382,7 @@ fn schema_newer_is_refused_and_a_missing_version_is_corrupt() {
     std::thread::sleep(Duration::from_millis(20));
     let refused = fail(bpm(home, home, &["--catalog", cat, "query", "entities"]));
     assert!(
-        refused.err.contains("99") && refused.err.contains("(version 2)"),
+        refused.err.contains("99") && refused.err.contains("(version 3)"),
         "{}",
         refused.err
     );
@@ -1760,10 +1760,10 @@ fn an_orphan_entity_is_reported_and_repaired_instead_of_panicking() {
     raw(&catalog)
         .execute_batch(&format!(
             "INSERT INTO projects VALUES ('{project}', 'no-such-program', 'Lost', 't', 't');
-             INSERT INTO cases VALUES ('{case}', '{project}', 't', 't');
+             INSERT INTO cases (id, project_id, created_at, updated_at) VALUES ('{case}', '{project}', 't', 't');
              INSERT INTO entity_metadata VALUES ('case', '{case}', 'subject_id', 'X', 't');
              INSERT INTO files (id, created_at) VALUES ('{file}', 't');
-             INSERT INTO file_links VALUES ('{file}', 'case', '{case}', 'data');
+             INSERT INTO file_links (file_id, node_type, node_id, role) VALUES ('{file}', 'case', '{case}', 'data');
              INSERT INTO entity_metadata VALUES ('sample', 'no-such-sample', 'k', 'v', 't');"
         ))
         .unwrap();

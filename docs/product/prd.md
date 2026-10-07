@@ -183,9 +183,11 @@ The digest Core computes by reading bytes is BLAKE3, recorded `blake3:<hex>`. An
 
 A location is one place those bytes were seen. The usual case is a single location, recorded by the ingest that created the file. Another location is added only when a later ingest finds a path, or later an object-store URI, whose full digest matches this file. Until a digest exists, a second path is a new file id and a possible-duplicate report. The operator does not create locations by hand. Each location has its own presence, so one copy can be missing while another is readable, and drift is reported per location. Linking an entity links the file id, and every present location is that file. Byte summaries count the file once. Materialize reads any location that is present. After a move, the old location stays on the file as missing until the operator removes that location. Removing a location leaves the file and its other locations in place.
 
-Zero links is the normal state of a file an ingest has not yet attached. One link attaches the file to one entity. Further links attach the same file id to other entities without a second copy of the bytes. That is how one control or reference file is associated with several samples, and how one consent document is associated with two cases. Repeating `bpm link` adds a link. A query for files under an entity returns the file when any link points there. Removing one link leaves the others. The file is unlinked when the last link is removed. In a Govern release, the file is withheld where the release reaches it only through excluded entities. A link on an included entity still includes the file. A document linked to both a Project and a Case remains available to the Project when that Case is excluded.
+Zero links is the normal state of a file an ingest has not yet attached. One link attaches the file to one entity. Further links attach the same file id to other entities without a second copy of the bytes. That is how one control or reference file is associated with several samples, and how one consent document is associated with two cases. Linking the same file to another entity adds a link. Linking it again to the same entity with the same role changes nothing. A query for files under an entity returns the file when any link points there. Removing one link leaves the others. The file is unlinked when the last link is removed. In a Govern release, the file is withheld where the release reaches it only through excluded entities. A link on an included entity still includes the file. A document linked to both a Project and a Case remains available to the Project when that Case is excluded.
 
-A link has a role. The role is an open string chosen by the operator. Core gives no role special behavior, and no role name is reserved. Example: a companion such as a BAI is its own file, linked to the same entity as the BAM, and might be assigned role `index`. A primary flag is not part of the command until we define what it changes.
+A link has a role. The role is chosen by the operator, and the vocabulary is open. Core gives no role special behavior, and no role name is reserved. Example: a companion such as a BAI is its own file, linked to the same entity as the BAM, and might be assigned role `index`. A role is spelled with lowercase letters, digits, `_`, and `-`. Each catalog keeps the roles it has seen, starting from `data`, `index`, `document`, `report`, `qc`, and `checksum`. A role not on that list needs `--new-role` the first time, so a typo does not start a second spelling. Changing the role of an existing link needs `--set-role`. A primary flag is not part of the command until we define what it changes.
+
+One `bpm link` command can link many files. A target template names the entity each file attaches to. Values come from a pattern matched against the file's name or path, or from a mapping table. The template also says which levels of the tree the command may create. The command shows its plan, asks before it creates entities, and writes everything or nothing. `bpm undo` reverses one such run. The [link guide](../guide/link.md) is the reference, and [ADR 0002](../adr/0002-link-templates.md) records why the template has this shape.
 
 ### 4.6 Ingest and scan
 
@@ -337,7 +339,7 @@ Core stores `consent`, `embargo_until`, and any other policy note the operator w
 
 ### 4.13 Command vocabulary
 
-Rows with an empty Unstable cell are the Core command contract. A `*` means the command is under consideration and is not finalized, in this section or in the section cited. Flag spelling for an unmarked command is fixed when that command is implemented. `bpm scan --md5` requests an MD5 digest as a second pass. The download flag for object stores is deferred until that stage. Other scan flags are still TBD and are not part of the contract yet. `bpm link` takes an entity and a role string. It does not take a primary flag. That idea is undefined until we give it behavior.
+Rows with an empty Unstable cell are the Core command contract. A `*` means the command is under consideration and is not finalized, in this section or in the section cited. Flag spelling for an unmarked command is fixed when that command is implemented. `bpm scan --md5` requests an MD5 digest as a second pass. The download flag for object stores is deferred until that stage. Other scan flags are still TBD and are not part of the contract yet. `bpm link` takes a target template, a role, and files; its flags are in the [link guide](../guide/link.md). It does not take a primary flag. That idea is undefined until we give it behavior.
 
 The token typed into `bpm serve` is not `bpm login`. `bpm login` is the future client for a Govern server.
 
@@ -352,7 +354,8 @@ The token typed into `bpm serve` is not `bpm login`. `bpm login` is the future c
 | `bpm meta set / get / unset` | Edit metadata on an entity or a file | |
 | `bpm ingest` | Add files from a path. Does not recheck files already in the catalog, except when a new path is a duplicate of one | |
 | `bpm scan` | Report drift for locations already in the catalog. A local filesystem read stores BLAKE3. `--md5` also stores MD5. An object store that publishes a checksum is trusted unless a download is requested. No arguments scans every location. A backend or a path narrows that set | |
-| `bpm link` / `bpm unlink` | Attach or detach a file and an entity. The role is an open string | |
+| `bpm link` / `bpm unlink` | Attach or detach files and entities. One file, or many placed by a template, a pattern, or a mapping table. Link may create Cases, Samples, Raw Data, and Analyses on the way. One transaction | |
+| `bpm undo` | Reverse one link run: its links, the entities it created, and the roles it changed | |
 | `bpm acknowledge` | Accept drifted bytes of one file as a new generation. Takes one file id or one location path. Never more than one file | |
 | `bpm sql` | Local SQL, read-only unless `--write` | |
 | `bpm repair` | List rows that break the catalog's integrity. `--apply` removes them | |
@@ -389,7 +392,7 @@ bpm meta set <raw-uuid> assay WES
 bpm meta set <raw-uuid> batch_id RUN42
 ```
 
-They run `bpm ingest` on the run directory. The FASTQs appear as unlinked files. They link `S1_R1.fq.gz` and `S1_R2.fq.gz` to the Raw Data UUID with role `data`. A slide for the same participant is a second Sample under the same Case, with `sample_kind=slide` and `source_sample` set to the first Sample's UUID. The SVS is linked to a Raw Data node under that slide Sample.
+They run `bpm ingest` on the run directory. The FASTQs appear as unlinked files. They link `S1_R1.fq.gz` and `S1_R2.fq.gz` to the Raw Data UUID with role `data`: `bpm link --to <raw-uuid> --role data S1_R1.fq.gz S1_R2.fq.gz`. For a whole run they would instead let one command build the Cases, Samples, and Raw Data nodes from the file names, as the [link guide](../guide/link.md) shows. The recommended practice there is one Raw Data node per FASTQ. A pair on one node, as here, is also allowed. A slide for the same participant is a second Sample under the same Case, with `sample_kind=slide` and `source_sample` set to the first Sample's UUID. The SVS is linked to a Raw Data node under that slide Sample.
 
 While that Case is the only entity under the Project with that subject id, its address is `/CLL/WES-relapse/subject_id:CLL-001`.
 
@@ -433,6 +436,14 @@ Scenarios below describe Core behavior. A scenario marked deferred or unstable b
 30. **Two catalogs.** Entities created in catalog A are invisible to queries against catalog B.
 31. **Benchmark.** A synthetic catalog of 1,000,000 files and 5,000,000 metadata entries runs `files --under` a Project and `entities --where` a metadata key. The harness records elapsed time. The target is interactive response, a few seconds, on one workstation.
 32. **Repair.** A Project whose Program row was removed outside `bpm` makes `bpm query entities` fail with a message that names `bpm repair`, not a crash. `bpm repair` lists that Project and exits non-zero. `bpm repair --apply` removes it with its Cases and their metadata and links, keeps the file rows, and a second `bpm repair` reports the catalog consistent. `bpm reparent` can instead move the Project under an existing Program.
+
+33. **Bulk link.** With BAMs and their indexes ingested from one directory and no Cases, one `bpm link` with the template `/P/J/case[subject_id:{1}]?/sample?/raw_data?/analysis[pipeline:bwa]?` and a pattern that captures the subject creates one Case, Sample, Raw Data, and Analysis per subject. Each BAM and its index share that Analysis, and the Case carries `subject_id`. `-n` writes nothing. Without a terminal and without `--yes`, the run refuses and writes nothing. Running it again writes nothing.
+34. **All or nothing.** With Cases for two of three subjects, a template whose case step must exist fails for the third subject, names it, and creates nothing for the other two.
+35. **Expected shape.** With one Raw Data node per FASTQ and `--expect sample=2`, a subject with R1 and no R2 fails the run and is named. Two lanes that the template does not tell apart are caught by `--expect raw_data=1`.
+36. **One Sample, two runs.** Two runs that link WES and then WGS reads with `sample?` leave one Sample with two Raw Data nodes. With a second Sample present, `sample?` fails as ambiguous.
+37. **Mapping table.** A table joined on a captured barcode places each file under the subject and tissue its row names. A file with no row fails the run. Rows no file reached are reported, and are an error with `--strict`.
+38. **Roles.** A role with an uppercase letter is refused. A role new to the catalog is refused without `--new-role`. Linking an existing pair with another role is refused without `--set-role`.
+39. **Undo.** `bpm undo` of a link run removes its links and the entities it created and keeps the file rows. It refuses while a later link run has linked files to those entities, and names that run. After that run is undone, it succeeds. Undo of a `--set-role` run restores the old role.
 
 ### 4.16 Core release slices
 
@@ -577,6 +588,7 @@ These were settled before the draft, or chosen while writing it so the acceptanc
 | Entity names | `name` is required on Program and Project only, and forms their path. Case, Sample, Raw Data, and Analysis have no name and are addressed by UUID. Study identifiers are ordinary metadata. |
 | Sample granularity | Analyte, portion, slide, and aliquot are metadata. Sibling Samples plus `source_sample` cover a specimen and its slide when both must be nodes. |
 | Discovery | Scan first, link second. Unlinked files are kept. |
+| Linking | One target template with typed steps and per-step modes, not upstream and downstream flags. Every level is written. One transaction, a plan first, a question before creating entities, and undo by run (ADR 0002). |
 | Identity | Stable file id, plus tagged digests, plus locations. Fingerprint suggests, and only within one scheme. BLAKE3 confirms when bytes are read. A published backend checksum is trusted. |
 | Ingest and scan | `bpm ingest` adds new paths and consults the catalog only for duplicates. `bpm scan` reports drift for locations already ingested, computing BLAKE3 when it reads bytes. `--md5` is an optional second pass. |
 | License | Apache-2.0. |
@@ -597,3 +609,4 @@ Answers here would change this draft.
 2. **Format parsers.** Core v1 ingests metadata the operator supplies. It does not read FASTQ, BAM, VCF, or SVS headers. Parsers would improve augmentation and would widen Core's scope.
 3. **BPM-Lite import.** No migration acceptance test until we know whether BPM-Lite data needs to land in a Core catalog.
 4. **Consent allow-list strictness.** A missing `consent` excludes a node from a Govern release. Confirm that this is the institutional default, including for catalogs that mix human and non-human data.
+5. **Link conveniences.** Two `bpm link` features were set aside. One reports files on disk under a directory operand that are not in the catalog, which needs a decision on which blacklist and whitelist apply. The other maps a captured value to a role (`--role-map bam=data,bai=index`).

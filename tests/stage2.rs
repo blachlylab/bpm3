@@ -256,7 +256,7 @@ fn query_files_count_respects_the_filters_and_the_format() {
 
     let id = env.id_at(&dir.join("a.fq"));
     env.create(&["program", "--name", "CLL"]);
-    ok(env.bpm(&["link", &id, "/CLL", "--role", "data"]));
+    ok(env.bpm(&["link", "--to", "/CLL", &id, "--role", "data"]));
     assert_eq!(
         ok(env.bpm(&["query", "files", "--count", "--role", "data"])).out,
         "count\n1\n"
@@ -363,7 +363,7 @@ fn scenario_13_duplicate_after_scan_joins_the_existing_file() {
 
     // A linked file takes a second location the same way.
     env.create(&["program", "--name", "CLL"]);
-    ok(env.bpm(&["link", &id, "/CLL", "--role", "data"]));
+    ok(env.bpm(&["link", "--to", "/CLL", &id, "--role", "data"]));
 
     let run = env.ingest(&archive);
     assert!(
@@ -936,7 +936,7 @@ fn scenario_20_link_query_and_unlink() {
     let raw = env.create(&["raw_data", "--parent", &sample]);
     let other_case = env.create(&["case", "--parent", "/CLL/WES"]);
 
-    ok(env.bpm(&["link", fq.to_str().unwrap(), &raw, "--role", "data"]));
+    ok(env.bpm(&["link", "--to", &raw, fq.to_str().unwrap(), "--role", "data"]));
     let under = env.files(&["--under", &case]);
     assert_eq!(under.len(), 1);
     assert_eq!(under[0]["links"][0]["role"], "data");
@@ -952,23 +952,32 @@ fn scenario_20_link_query_and_unlink() {
     assert!(env.files(&["--under", &other_case]).is_empty());
 
     let id = env.id_at(&fq);
-    ok(env.bpm(&["link", &id, &other_case, "--role", "control"]));
+    ok(env.bpm(&[
+        "link",
+        "--to",
+        &other_case,
+        &id,
+        "--role",
+        "control",
+        "--new-role",
+    ]));
     assert_eq!(env.files(&["--under", &other_case]).len(), 1);
     assert_eq!(env.file_at(&fq)["links"].as_array().unwrap().len(), 2);
 
-    ok(env.bpm(&["unlink", &id, &raw]));
+    ok(env.bpm(&["unlink", "--to", &raw, &id]));
     assert!(env.files(&["--under", &case]).is_empty());
     assert_eq!(env.files(&["--under", &other_case]).len(), 1);
-    fail(env.bpm(&["unlink", &id, &raw]));
+    fail(env.bpm(&["unlink", "--to", &raw, &id]));
     // A link needs a file the catalog knows and a role.
     fail(env.bpm(&[
         "link",
-        env.data().join("nope").to_str().unwrap(),
+        "--to",
         &raw,
+        env.data().join("nope").to_str().unwrap(),
         "--role",
         "data",
     ]));
-    fail(env.bpm(&["link", &id, &raw, "--role", ""]));
+    fail(env.bpm(&["link", "--to", &raw, &id, "--role", ""]));
 }
 
 #[test]
@@ -983,12 +992,12 @@ fn scenario_21_unlink_and_cascade_delete_keep_files_and_bytes() {
     let case = env.create(&["case", "--parent", "/CLL/WES"]);
     let id = env.id_at(&fq);
 
-    ok(env.bpm(&["link", &id, &case, "--role", "data"]));
-    ok(env.bpm(&["unlink", &id, &case]));
+    ok(env.bpm(&["link", "--to", &case, &id, "--role", "data"]));
+    ok(env.bpm(&["unlink", "--to", &case, &id]));
     assert_eq!(env.count("files"), 1);
     assert_eq!(env.files(&["--unlinked"]).len(), 1);
 
-    ok(env.bpm(&["link", &id, &case, "--role", "data"]));
+    ok(env.bpm(&["link", "--to", &case, &id, "--role", "data"]));
     fail(env.bpm(&["delete", "/CLL"]));
     ok(env.bpm(&["delete", "--cascade", "/CLL"]));
     assert_eq!(
@@ -1013,7 +1022,7 @@ fn deleting_a_linked_file_needs_cascade() {
     env.ingest(&run42);
     env.create(&["program", "--name", "CLL"]);
     let id = env.id_at(&run42.join("a.fq"));
-    ok(env.bpm(&["link", &id, "/CLL", "--role", "data"]));
+    ok(env.bpm(&["link", "--to", "/CLL", &id, "--role", "data"]));
     let refused = fail(env.bpm(&["delete", "--file", &id]));
     assert!(refused.err.contains("links"), "{}", refused.err);
     ok(env.bpm(&["delete", "--file", &id, "--cascade"]));
@@ -1372,8 +1381,15 @@ fn symlinks_follow_the_walk_rules() {
     assert_eq!(env.location(&real)["uri"], real.to_str().unwrap());
     let id = env.id_at(&real);
     env.create(&["program", "--name", "CLL"]);
-    ok(env.bpm(&["link", alias.to_str().unwrap(), "/CLL", "--role", "data"]));
-    ok(env.bpm(&["unlink", real.to_str().unwrap(), "/CLL"]));
+    ok(env.bpm(&[
+        "link",
+        "--to",
+        "/CLL",
+        alias.to_str().unwrap(),
+        "--role",
+        "data",
+    ]));
+    ok(env.bpm(&["unlink", "--to", "/CLL", real.to_str().unwrap()]));
     for dir in ["real", "alias"] {
         let scan = env.scan(&root.join(dir));
         assert!(scan.out.contains(": 1 locations"), "{dir}: {}", scan.out);
@@ -1491,11 +1507,28 @@ fn a_run_whose_process_died_is_marked_incomplete() {
     assert!(leftovers.is_empty());
 }
 
+/// Take a fresh catalog back to version 2 by removing what V003 added.
+const BACK_TO_V2: &str = "DROP TABLE link_role_changes;
+     DROP TABLE link_runs;
+     DROP TABLE link_roles;
+     DROP INDEX file_links_run;
+     DROP INDEX cases_run;
+     DROP INDEX samples_run;
+     DROP INDEX raw_data_run;
+     DROP INDEX analyses_run;
+     ALTER TABLE file_links DROP COLUMN run_id;
+     ALTER TABLE cases DROP COLUMN run_id;
+     ALTER TABLE samples DROP COLUMN run_id;
+     ALTER TABLE raw_data DROP COLUMN run_id;
+     ALTER TABLE analyses DROP COLUMN run_id;
+     UPDATE catalog_meta SET value = '2' WHERE key = 'schema_version';";
+
 #[test]
 fn a_version_1_catalog_migrates_to_the_file_indexes() {
     let env = Env::new("v1");
     {
         let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V2).unwrap();
         conn.execute_batch(
             "DROP INDEX files_fingerprint;
              DROP INDEX file_digests_digest;
@@ -1510,7 +1543,7 @@ fn a_version_1_catalog_migrates_to_the_file_indexes() {
     env.ingest(&env.data());
     assert_eq!(
         env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
-        "2"
+        "3"
     );
     assert_eq!(
         env.scalar(
@@ -1519,4 +1552,47 @@ fn a_version_1_catalog_migrates_to_the_file_indexes() {
         ),
         "2"
     );
+}
+
+#[test]
+fn a_version_2_catalog_keeps_its_links_and_their_roles_become_known() {
+    let env = Env::new("v2");
+    write(&env.data().join("a.fq"), b"a\n");
+    env.ingest(&env.data());
+    env.create(&["program", "--name", "CLL"]);
+    let id = env.id_at(&env.data().join("a.fq"));
+    {
+        let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V2).unwrap();
+        // A role the old `bpm link` accepted, outside the seeded list.
+        conn.execute(
+            "INSERT INTO file_links (file_id, node_type, node_id, role)
+             SELECT ?, 'program', id, 'control' FROM programs",
+            [&id],
+        )
+        .unwrap();
+    }
+    let refused = fail(env.bpm(&["query", "files"]));
+    assert!(refused.err.contains("older"), "{}", refused.err);
+    // Any writing command migrates; link is one.
+    write(&env.data().join("b.fq"), b"b\n");
+    env.ingest(&env.data());
+    assert_eq!(
+        env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
+        "3"
+    );
+    assert_eq!(
+        env.scalar("SELECT COUNT(*) FROM file_links WHERE run_id IS NULL AND role = 'control'"),
+        "1"
+    );
+    // The existing role is known, so it needs no --new-role.
+    let b = env.data().join("b.fq");
+    ok(env.bpm(&[
+        "link",
+        "--to",
+        "/CLL",
+        b.to_str().unwrap(),
+        "--role",
+        "control",
+    ]));
 }
