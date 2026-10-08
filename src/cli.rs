@@ -131,7 +131,7 @@ enum Command {
         strict: bool,
         #[command(flatten)]
         show: ShowArgs,
-        /// Apply a plan that creates entities without asking.
+        /// Apply the plan without asking.
         #[arg(short, long)]
         yes: bool,
     },
@@ -882,8 +882,8 @@ fn dispatch() -> Result<(), Error> {
     Ok(())
 }
 
-/// Plan a link or unlink run, show it, confirm it when it creates entities,
-/// and apply it.
+/// Plan a link or unlink run, show it, confirm a link run that writes, and
+/// apply it.
 #[allow(clippy::too_many_arguments)]
 fn run_links(
     flag: Option<&Path>,
@@ -1031,8 +1031,14 @@ fn run_links(
     if show.dry_run {
         return Ok(());
     }
-    if plan.created() > 0 && !yes {
-        confirm(&format!("this run creates {} entities", plan.created()))?;
+    let writes = plan.count("link") + plan.count("set-role") + plan.created();
+    if !options.unlink && writes > 0 && !yes {
+        confirm(&format!(
+            "this run adds {} links, changes {} roles, and creates {} entities",
+            plan.count("link"),
+            plan.count("set-role"),
+            plan.created()
+        ))?;
     }
     let command = serde_json::to_string(&std::env::args().collect::<Vec<_>>())
         .unwrap_or_else(|_| "[]".into());

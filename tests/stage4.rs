@@ -105,6 +105,7 @@ impl Fixture {
         run(&["scan", data.to_str().unwrap()]);
         run(&[
             "link",
+            "--yes",
             "--to",
             &raw,
             data.join("S1_R1.fq.gz").to_str().unwrap(),

@@ -1,6 +1,6 @@
 //! Bulk link, unlink, and undo: the four scenarios in the link guide, the
 //! checks around them, and undo. Each test uses its own HOME, catalog, and data
-//! directory. A test process has no terminal, so a run that creates entities
+//! directory. A test process has no terminal, so a link run that writes
 //! needs `--yes`.
 
 use std::fs;
@@ -337,8 +337,20 @@ fn scenario_4_one_file_to_an_existing_case() {
     ok(env.bpm(&["meta", "set", &case, "subject_id", "CLL-001"]));
     env.files(&["consent.xlsx"]);
     let file = env.data().join("consent.xlsx");
+    // A link to an existing entity creates nothing, and still needs --yes.
+    let refused = fail(env.bpm(&[
+        "link",
+        "--to",
+        "/P/J/case[subject_id:CLL-001]",
+        "--role",
+        "document",
+        file.to_str().unwrap(),
+    ]));
+    assert!(refused.err.contains("--yes"), "{}", refused.err);
+    assert!(env.under(&case).is_empty());
     ok(env.bpm(&[
         "link",
+        "--yes",
         "--to",
         "/P/J/case[subject_id:CLL-001]",
         "--role",
@@ -500,6 +512,7 @@ fn roles_are_checked_against_the_catalog_list() {
     assert!(new.err.contains("--new-role"), "{}", new.err);
     ok(env.bpm(&[
         "link",
+        "--yes",
         "--to",
         "/P/J",
         "--role",
@@ -512,6 +525,7 @@ fn roles_are_checked_against_the_catalog_list() {
     assert!(other.err.contains("--set-role"), "{}", other.err);
     let changed = ok(env.bpm(&[
         "link",
+        "--yes",
         "--to",
         "/P/J",
         "--role",
@@ -546,6 +560,7 @@ fn undo_removes_a_run_and_refuses_while_later_work_depends_on_it() {
     ]));
     let second = ok(env.bpm(&[
         "link",
+        "--yes",
         "--to",
         "/P/J/case[subject_id:{1}]/sample/raw_data/analysis[pipeline:bwa]",
         "--match",

@@ -256,7 +256,7 @@ fn query_files_count_respects_the_filters_and_the_format() {
 
     let id = env.id_at(&dir.join("a.fq"));
     env.create(&["program", "--name", "CLL"]);
-    ok(env.bpm(&["link", "--to", "/CLL", &id, "--role", "data"]));
+    ok(env.bpm(&["link", "--yes", "--to", "/CLL", &id, "--role", "data"]));
     assert_eq!(
         ok(env.bpm(&["query", "files", "--count", "--role", "data"])).out,
         "count\n1\n"
@@ -410,7 +410,7 @@ fn scenario_13_duplicate_after_scan_joins_the_existing_file() {
 
     // A linked file takes a second location the same way.
     env.create(&["program", "--name", "CLL"]);
-    ok(env.bpm(&["link", "--to", "/CLL", &id, "--role", "data"]));
+    ok(env.bpm(&["link", "--yes", "--to", "/CLL", &id, "--role", "data"]));
 
     let run = env.ingest(&archive);
     assert!(
@@ -1098,7 +1098,15 @@ fn scenario_20_link_query_and_unlink() {
     let raw = env.create(&["raw_data", "--parent", &sample]);
     let other_case = env.create(&["case", "--parent", "/CLL/WES"]);
 
-    ok(env.bpm(&["link", "--to", &raw, fq.to_str().unwrap(), "--role", "data"]));
+    ok(env.bpm(&[
+        "link",
+        "--yes",
+        "--to",
+        &raw,
+        fq.to_str().unwrap(),
+        "--role",
+        "data",
+    ]));
     let under = env.files(&["--under", &case]);
     assert_eq!(under.len(), 1);
     assert_eq!(under[0]["links"][0]["role"], "data");
@@ -1116,6 +1124,7 @@ fn scenario_20_link_query_and_unlink() {
     let id = env.id_at(&fq);
     ok(env.bpm(&[
         "link",
+        "--yes",
         "--to",
         &other_case,
         &id,
@@ -1154,12 +1163,12 @@ fn scenario_21_unlink_and_cascade_delete_keep_files_and_bytes() {
     let case = env.create(&["case", "--parent", "/CLL/WES"]);
     let id = env.id_at(&fq);
 
-    ok(env.bpm(&["link", "--to", &case, &id, "--role", "data"]));
+    ok(env.bpm(&["link", "--yes", "--to", &case, &id, "--role", "data"]));
     ok(env.bpm(&["unlink", "--to", &case, &id]));
     assert_eq!(env.count("files"), 1);
     assert_eq!(env.files(&["--unlinked"]).len(), 1);
 
-    ok(env.bpm(&["link", "--to", &case, &id, "--role", "data"]));
+    ok(env.bpm(&["link", "--yes", "--to", &case, &id, "--role", "data"]));
     fail(env.bpm(&["delete", "/CLL"]));
     ok(env.bpm(&["delete", "--cascade", "/CLL"]));
     assert_eq!(
@@ -1184,7 +1193,7 @@ fn deleting_a_linked_file_needs_cascade() {
     env.ingest(&run42);
     env.create(&["program", "--name", "CLL"]);
     let id = env.id_at(&run42.join("a.fq"));
-    ok(env.bpm(&["link", "--to", "/CLL", &id, "--role", "data"]));
+    ok(env.bpm(&["link", "--yes", "--to", "/CLL", &id, "--role", "data"]));
     let refused = fail(env.bpm(&["delete", "--file", &id]));
     assert!(refused.err.contains("links"), "{}", refused.err);
     ok(env.bpm(&["delete", "--file", &id, "--cascade"]));
@@ -1545,6 +1554,7 @@ fn symlinks_follow_the_walk_rules() {
     env.create(&["program", "--name", "CLL"]);
     ok(env.bpm(&[
         "link",
+        "--yes",
         "--to",
         "/CLL",
         alias.to_str().unwrap(),
@@ -1751,6 +1761,7 @@ fn a_version_2_catalog_keeps_its_links_and_their_roles_become_known() {
     let b = env.data().join("b.fq");
     ok(env.bpm(&[
         "link",
+        "--yes",
         "--to",
         "/CLL",
         b.to_str().unwrap(),

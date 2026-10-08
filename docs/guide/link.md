@@ -148,7 +148,7 @@ roles: data 6
 
 - **`-n` / `--dry-run`** prints the plan and stops.
 - **`--detail`** adds one line per file: action (`link`, `already`, `set-role`, `skip`, `unlink`), location, target, and role.
-- **Confirmation.** When the plan creates entities, `bpm` asks `Apply? [y/N]` on a terminal. With no terminal it refuses, unless `--yes` is passed. A run that only adds links to existing entities does not ask.
+- **Confirmation.** When the plan writes anything (links, role changes, or entities), `bpm` asks `Apply? [y/N]` on a terminal. With no terminal it refuses, unless `--yes` is passed. A run with nothing to write does not ask.
 - **One transaction.** The run either writes everything or nothing. Between the plan and the write, `bpm` plans again under the write lock. If the catalog changed in between, it writes nothing and says so.
 - **The result line.** A run that writes prints `link run <id>: …`. That id is what `bpm undo` takes.
 
@@ -249,7 +249,7 @@ bpm undo 01a116f9-9f5e-70ec-a2c9-b393d8bb4c4e
 - it removes the entities the run created, with the metadata the run wrote on them;
 - it puts back the roles the run changed.
 
-File rows and bytes are never touched. Undo asks before it deletes entities, as link does before it creates them, and `--yes` skips the question.
+File rows and bytes are never touched. Undo asks before it deletes entities, and `--yes` skips the question.
 
 Undo refuses, and lists why, when later work depends on the run:
 
