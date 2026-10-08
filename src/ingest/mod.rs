@@ -379,7 +379,11 @@ impl ScanProgress {
     }
 
     fn due(&self) -> bool {
-        let every = if self.tty { SCAN_REDRAW } else { SCAN_LOG_EVERY };
+        let every = if self.tty {
+            SCAN_REDRAW
+        } else {
+            SCAN_LOG_EVERY
+        };
         self.last.elapsed() >= every
     }
 

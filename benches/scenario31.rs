@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use bpm3::catalog::{Catalog, EntityQuery, FileQuery};
 use bpm3::model::{Drift, NodeType, parse_selector};
-use bpm3::query::{RenderFormat, render_entities, render_files};
+use bpm3::query::{FileLayout, RenderFormat, render_entities, render_files};
 use rusqlite::{Connection, params};
 use uuid::Uuid;
 
@@ -361,7 +361,7 @@ fn time_queries(path: &Path) -> serde_json::Value {
                 Query::Files(query) => {
                     let found = catalog.query_files(query).unwrap();
                     rows = found.len();
-                    render_files(&found, RenderFormat::Table)
+                    render_files(&found, RenderFormat::Table, FileLayout::Compact)
                 }
                 Query::Entities(query) => {
                     let found = catalog.query_entities(query).unwrap();

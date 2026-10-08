@@ -335,6 +335,9 @@ enum QueryCmd {
         /// Print how many files match, instead of the rows.
         #[arg(short, long)]
         count: bool,
+        /// Table only: full ids, byte counts, digests, paths, and link ids.
+        #[arg(long)]
+        full: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: OutFmt,
     },
@@ -829,6 +832,7 @@ fn dispatch() -> Result<(), Error> {
                 drift,
                 digest,
                 count,
+                full,
                 format,
             } => {
                 let digest = digest
@@ -850,7 +854,12 @@ fn dispatch() -> Result<(), Error> {
                     );
                 } else {
                     let rows = catalog.query_files(&query)?;
-                    print!("{}", query::render_files(&rows, format.into()));
+                    let layout = if full {
+                        query::FileLayout::Full
+                    } else {
+                        query::FileLayout::Compact
+                    };
+                    print!("{}", query::render_files(&rows, format.into(), layout));
                 }
             }
             QueryCmd::Impact { .. } => return Err(Error::NotThisMilestone("impact")),

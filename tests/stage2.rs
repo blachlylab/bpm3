@@ -273,6 +273,53 @@ fn query_files_count_respects_the_filters_and_the_format() {
 }
 
 #[test]
+fn query_files_table_is_compact_until_full() {
+    let env = Env::new("compact");
+    let path = env.data().join("run").join("a.fq");
+    write(&path, b"aaa\n");
+    env.ingest(path.parent().unwrap());
+
+    let id = env.id_at(&path);
+    let tail = id.rsplit_once('-').unwrap().1;
+    let compact = ok(env.bpm(&["query", "files"])).out;
+    assert_eq!(
+        compact
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        ["id", "size", "digest", "drift", "name", "links"]
+    );
+    let row = compact.lines().nth(1).unwrap();
+    assert!(row.contains(tail), "{row}");
+    assert!(row.contains("4 B"), "{row}");
+    assert!(row.contains("unverified"), "{row}");
+    assert!(row.contains("a.fq"), "{row}");
+    assert!(!row.contains('/'), "{row}");
+    assert!(!row.contains('-'), "{row}");
+
+    let full = ok(env.bpm(&["query", "files", "--full"])).out;
+    assert_eq!(
+        full.lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        ["id", "size", "digest", "drift", "locations", "links"]
+    );
+    let wide = full.lines().nth(1).unwrap();
+    assert!(wide.split_whitespace().any(|cell| cell == id), "{wide}");
+    assert!(wide.split_whitespace().any(|cell| cell == "4"), "{wide}");
+    assert!(wide.contains(path.to_str().unwrap()), "{wide}");
+
+    let csv = ok(env.bpm(&["query", "files", "--format", "csv"])).out;
+    assert!(csv.lines().next().unwrap().starts_with("id,size,digest,"));
+    assert!(csv.contains(&id));
+    assert!(csv.contains(path.to_str().unwrap()));
+}
+
+#[test]
 fn scenario_10_ingest_creates_unlinked_rows_without_payload() {
     let env = Env::new("s10");
     let run42 = env.data().join("run42");
@@ -455,12 +502,14 @@ fn scan_logs_its_total_and_counts_against_it() {
     );
     // Through a pipe: a line every hundred locations, and one for the last.
     assert!(
-        run.err.contains("bpm: 100/101 locations, 900 B of 909 B read"),
+        run.err
+            .contains("bpm: 100/101 locations, 900 B of 909 B read"),
         "{}",
         run.err
     );
     assert!(
-        run.err.contains("bpm: 101/101 locations, 909 B of 909 B read"),
+        run.err
+            .contains("bpm: 101/101 locations, 909 B of 909 B read"),
         "{}",
         run.err
     );
