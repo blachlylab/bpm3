@@ -36,7 +36,7 @@ const WORKERS: usize = 8;
 
 /// How often the stderr count moves. A terminal rewrites one line; a pipe
 /// gets a new line, because a carriage return would not erase the last one.
-const PROGRESS_EVERY: u64 = 100;
+const PROGRESS_EVERY: u64 = 10;
 
 /// How often a scan's line moves between those counts, so one large file does
 /// not leave it still. A terminal redraws in place; a pipe gets fewer lines.

@@ -424,7 +424,7 @@ fn scenario_13_duplicate_after_scan_joins_the_existing_file() {
 }
 
 #[test]
-fn ingest_logs_its_start_and_counts_every_hundred_files() {
+fn ingest_logs_its_start_and_counts_every_ten_files() {
     let env = Env::new("progress");
     let one = env.data().join("one");
     write(&one.join("notes.txt"), b"notes\n");
@@ -468,11 +468,17 @@ fn ingest_logs_its_start_and_counts_every_hundred_files() {
     );
     assert!(run.err.contains("bpm: whitelist *.png"), "{}", run.err);
     assert!(run.err.contains("bpm: blacklist *.tmp"), "{}", run.err);
-    // The test captures stderr through a pipe, so the count is a plain line.
+    // The test captures stderr through a pipe, so each count is a plain line.
     // A terminal rewrites that line instead; see paint_progress.
-    assert!(run.err.contains("bpm: 100 files seen"), "{}", run.err);
+    for count in (10..=100).step_by(10) {
+        assert!(
+            run.err.contains(&format!("bpm: {count} files seen")),
+            "{}",
+            run.err
+        );
+    }
     assert!(!run.err.contains('\u{1b}'), "{}", run.err);
-    assert!(!run.err.contains("bpm: 200 files seen"), "{}", run.err);
+    assert!(!run.err.contains("bpm: 110 files seen"), "{}", run.err);
     assert!(!run.err.contains("skip.txt"), "{}", run.err);
     assert!(
         run.out.contains("100 files seen, 100 new files"),
@@ -500,7 +506,13 @@ fn scan_logs_its_total_and_counts_against_it() {
         "{}",
         run.err
     );
-    // Through a pipe: a line every hundred locations, and one for the last.
+    // Through a pipe: a line every ten locations, and one for the last.
+    assert!(
+        run.err
+            .contains("bpm: 10/101 locations, 90 B of 909 B read"),
+        "{}",
+        run.err
+    );
     assert!(
         run.err
             .contains("bpm: 100/101 locations, 900 B of 909 B read"),

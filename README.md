@@ -142,7 +142,7 @@ Each of these rows is also a fresh catalog. `scratch/tmp.fq.gz` matches `*.fq.gz
 
 ## What ingest counts
 
-Ingest prints one summary line on stdout. It does not list the paths. On stderr it names the directory and any whitelist or blacklist in effect. Every 100 files it rewrites a single count line, so a run of hundreds of thousands of files stays one line:
+Ingest prints one summary line on stdout. It does not list the paths. On stderr it names the directory and any whitelist or blacklist in effect. Every 10 files it rewrites a single count line, so a run of hundreds of thousands of files stays one line:
 
 ```
 bpm: ingest /data/run42

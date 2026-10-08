@@ -18,15 +18,14 @@ pub enum FileLayout {
 }
 
 pub fn render_entities(rows: &[EntityRow], format: RenderFormat) -> String {
+    const HEADERS: [&str; 4] = ["node_type", "id", "path", "metadata"];
     match format {
-        RenderFormat::Table => render_table(
-            &["node_type", "id", "path", "name", "metadata"],
-            &rows.iter().map(entity_cells).collect::<Vec<_>>(),
-        ),
-        RenderFormat::Csv => render_csv(
-            &["node_type", "id", "path", "name", "metadata"],
-            &rows.iter().map(entity_cells).collect::<Vec<_>>(),
-        ),
+        RenderFormat::Table => {
+            render_table(&HEADERS, &rows.iter().map(entity_cells).collect::<Vec<_>>())
+        }
+        RenderFormat::Csv => {
+            render_csv(&HEADERS, &rows.iter().map(entity_cells).collect::<Vec<_>>())
+        }
         RenderFormat::Json => {
             let items: Vec<serde_json::Value> = rows
                 .iter()
@@ -35,7 +34,6 @@ pub fn render_entities(rows: &[EntityRow], format: RenderFormat) -> String {
                         "node_type": row.node_type.slug(),
                         "id": row.id.to_string(),
                         "path": row.path,
-                        "name": row.name,
                         "metadata": row.metadata,
                     })
                 })
@@ -189,7 +187,6 @@ fn entity_cells(row: &EntityRow) -> Vec<String> {
         row.node_type.slug().to_string(),
         row.id.to_string(),
         row.path.clone().unwrap_or_default(),
-        row.name.clone().unwrap_or_default(),
         metadata_text(&row.metadata),
     ]
 }
@@ -381,7 +378,9 @@ fn push_csv(out: &mut String, cells: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DigestRow, LinkRow, LocationRow, NodeType};
+    use std::collections::BTreeMap;
+
+    use crate::model::{DigestRow, EntityRow, LinkRow, LocationRow, NodeType};
     use uuid::Uuid;
 
     fn sample() -> FileRow {
@@ -421,6 +420,40 @@ mod tests {
                 role: "data".into(),
             }],
         }
+    }
+
+    #[test]
+    fn entity_table_omits_the_name_column() {
+        let row = EntityRow {
+            node_type: NodeType::Program,
+            id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            path: Some("/CLL".into()),
+            name: Some("CLL".into()),
+            metadata: BTreeMap::from([("site".into(), "OHSU".into())]),
+        };
+        let table = render_entities(&[row.clone()], RenderFormat::Table);
+        assert_eq!(
+            table
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            ["node_type", "id", "path", "metadata"]
+        );
+        assert!(table.contains("/CLL"));
+        assert!(table.contains("site=OHSU"));
+
+        let csv = render_entities(&[row.clone()], RenderFormat::Csv);
+        assert!(csv.starts_with("node_type,id,path,metadata\n"));
+        assert!(csv.contains("/CLL"));
+        assert!(csv.contains("site=OHSU"));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&render_entities(&[row], RenderFormat::Json)).unwrap();
+        assert!(json[0].get("name").is_none());
+        assert_eq!(json[0]["path"], "/CLL");
+        assert_eq!(json[0]["metadata"]["site"], "OHSU");
     }
 
     #[test]
