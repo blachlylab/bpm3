@@ -239,7 +239,7 @@ Primary key `(file_id, key)`. An index on `(key, value)` supports the same selec
 | size_bytes | Last observed size at a present location, denormalized for query |
 | mtime | Last observed mtime, UTC |
 | fingerprint | Hex, or null when the bytes were not read |
-| fingerprint_scheme | Text, or null when `fingerprint` is null. The first schemes are `xxh3-128-full` and `xxh3-128-sample-v1`. Two fingerprints are compared only when the scheme strings are equal. A new scheme is a new string on newly written rows. Existing rows are not rewritten |
+| fingerprint_scheme | Text, or null when `fingerprint` is null. The first schemes were `xxh3-128-full` and `xxh3-128-sample-v1`; new rows get `xxh3-128-head-256k`. Two fingerprints are compared only when the scheme strings are equal. A new scheme is a new string. An existing row gets it when scan reads its bytes and its BLAKE3 holds |
 | created_at | First discovery |
 
 The file id does not depend on the fingerprint. Links, locations, and digests stay valid if the scheme changes or the fingerprint is null. The current digests are rows, not columns, so a computed BLAKE3 and a backend checksum of another algorithm coexist.
@@ -355,14 +355,30 @@ Possible duplicates (same size, same fingerprint scheme and value, different fil
 
 The fingerprint is a fast candidate filter. It is not part of the file id, and a catalog remains valid if the scheme changes or a row has none.
 
+Ingest, scan, and acknowledge write one scheme:
+
+| Scheme name | Bytes hashed |
+| --- | --- |
+| `xxh3-128-head-256k` | The first 256 KiB, or the whole file when it is shorter. The size is compared beside it and is not hashed. |
+
+Ingest reads at most 256 KiB of a new path, on eight threads per batch. Scan takes the same window from the full read it already makes. Two different files with the same size and the same first 256 KiB cost two full reads to tell apart; they are never merged.
+
+Earlier builds wrote two schemes, which rows may still carry:
+
 | File size | Scheme name | Bytes hashed |
 | --- | --- | --- |
 | ≤ 64 MiB | `xxh3-128-full` | The entire file |
 | > 64 MiB | `xxh3-128-sample-v1` | A length-prefixed sample: the file size as an 8-byte little-endian integer, then the first 1 MiB, 1 MiB centered on the midpoint, and the last 1 MiB. Short reads at the ends use the bytes that exist. |
 
+When a new path has the size of a row that carries an earlier scheme, ingest also computes the new path's fingerprint in that scheme and compares it, so a copy of a file ingested before the change is still found. Only sizes that match pay that read.
+
 XXH3-128 is the first hash, not a permanent choice. The scheme name is stored on the row that carries that fingerprint. Two fingerprints are compared only when those strings are equal. A different scheme, or a null fingerprint, is not evidence that the bytes differ. Confirmation is a digest comparison. Fingerprint equality never merges file ids.
 
-The 64 MiB cutoff and the 1 MiB windows belong to `xxh3-128-sample-v1`. Tests pin that name to that layout. A different cutoff or window is a new scheme name. Rows already stored keep the name they were written with. No migration rewrites them, and opening the catalog does not recompute them.
+The 256 KiB window belongs to `xxh3-128-head-256k`, and the 64 MiB cutoff and the 1 MiB windows to `xxh3-128-sample-v1`. Tests pin each name to its layout. A different cutoff or window is a new scheme name. No migration rewrites stored rows, and opening the catalog does not recompute them. The upgrade path for any later scheme is the same as for this one:
+
+1. New rows get the new scheme.
+2. Scan, which reads every byte anyway, writes the new scheme on a row whose stored scheme is older, but only when the BLAKE3 of that read matches the row's current digest. A fingerprint never describes bytes other than the current digest's.
+3. Until a row is upgraded, ingest compares a new path of the same size with it in the row's scheme. An earlier scheme stays computable, and pinned by its test, for as long as rows may carry it.
 
 ### Full digest
 

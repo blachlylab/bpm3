@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
@@ -28,6 +29,10 @@ use walk::{WalkItem, Walker};
 
 /// Files per committed batch. Internal; a crash keeps every committed batch.
 pub const BATCH: usize = 1000;
+
+/// Threads that stat and fingerprint one ingest batch. On a network
+/// filesystem each read waits on a round trip, so several in flight help.
+const WORKERS: usize = 8;
 
 /// How often the stderr count moves. A terminal rewrites one line; a pipe
 /// gets a new line, because a carriage return would not erase the last one.
@@ -183,7 +188,22 @@ fn ingest_walk(
     ingest_batch(catalog, run, paths, errors, report, &mut progress)
 }
 
-/// Plan one batch with no lock held, then apply it.
+/// One path of a batch, before its bytes are read.
+enum Probe {
+    Unusable(String, String),
+    Already,
+    Fresh(PathBuf, String),
+}
+
+/// What stat and the fingerprint read found for a fresh path.
+enum Read {
+    NotAFile,
+    StatFailed(String),
+    Stat(fs::Metadata, io::Result<Fingerprint>),
+}
+
+/// Plan one batch with no lock held, then apply it. The stats and fingerprint
+/// reads run on [`WORKERS`] threads; the plan is made in path order.
 fn ingest_batch(
     catalog: &mut Catalog,
     run: &Run,
@@ -192,39 +212,62 @@ fn ingest_batch(
     report: &mut IngestReport,
     progress: &mut Progress,
 ) -> Result<(), Error> {
-    let mut entries: Vec<IngestEntry> = Vec::new();
     let mut in_batch = HashSet::new();
+    let mut probes = Vec::with_capacity(paths.len());
+    for path in paths {
+        let probe = match utf8(&path) {
+            Err(err) => Probe::Unusable(path.to_string_lossy().into_owned(), err.to_string()),
+            Ok(uri) if !in_batch.insert(uri.clone()) || catalog.location_exists(POSIX, &uri)? => {
+                Probe::Already
+            }
+            Ok(uri) => Probe::Fresh(path, uri),
+        };
+        probes.push(probe);
+    }
+    let mut reads = parallel_map(&probes, |probe| match probe {
+        Probe::Fresh(path, _) => Some(match fs::metadata(path) {
+            Ok(meta) if meta.is_file() => {
+                let print = hash::fingerprint(path);
+                Read::Stat(meta, print)
+            }
+            Ok(_) => Read::NotAFile,
+            Err(err) => Read::StatFailed(err.to_string()),
+        }),
+        _ => None,
+    })
+    .into_iter();
+
+    let mut entries: Vec<IngestEntry> = Vec::new();
     // BLAKE3 of existing files hashed during this batch, by file id.
     let mut hashed: HashMap<Uuid, (String, String)> = HashMap::new();
-    for path in paths {
-        // Count here, where each file is read, so the line moves during the
-        // slow part of a large directory rather than during the listing.
+    for probe in probes {
         progress.file();
-        let uri = match utf8(&path) {
-            Ok(uri) => uri,
-            Err(err) => {
-                errors.push((path.to_string_lossy().into_owned(), err.to_string()));
+        let read = reads.next().flatten();
+        let (path, uri) = match probe {
+            Probe::Unusable(uri, message) => {
+                errors.push((uri, message));
                 continue;
             }
+            Probe::Already => {
+                report.already += 1;
+                continue;
+            }
+            Probe::Fresh(path, uri) => (path, uri),
         };
-        if !in_batch.insert(uri.clone()) || catalog.location_exists(POSIX, &uri)? {
-            report.already += 1;
-            continue;
-        }
-        let meta = match fs::metadata(&path) {
-            Ok(meta) if meta.is_file() => meta,
-            Ok(_) => continue,
-            Err(err) => {
-                errors.push((uri, err.to_string()));
+        let (meta, print) = match read {
+            Some(Read::Stat(meta, print)) => (meta, print),
+            Some(Read::StatFailed(message)) => {
+                errors.push((uri, message));
                 continue;
             }
+            Some(Read::NotAFile) | None => continue,
         };
         let seen = Seen {
             uri: uri.clone(),
             size: meta.len() as i64,
             mtime: mtime_text(&meta),
         };
-        let print = match hash::fingerprint(&path, meta.len()) {
+        let print = match print {
             Ok(print) => print,
             Err(err) => {
                 // The path is recorded, with no fingerprint, so a later scan
@@ -244,6 +287,7 @@ fn ingest_batch(
             &mut hashed,
             &mut errors,
             report,
+            &path,
             seen,
             print,
         )?;
@@ -254,6 +298,33 @@ fn ingest_batch(
     report.copies += applied.copies;
     report.errors.extend(errors);
     Ok(())
+}
+
+/// `each` over `items` on up to [`WORKERS`] threads, results in input order.
+fn parallel_map<T: Sync, R: Send>(items: &[T], each: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..WORKERS.min(items.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            return mine;
+                        };
+                        mine.push((index, each(item)));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("an ingest worker panicked"))
+            .collect()
+    });
+    done.sort_unstable_by_key(|(index, _)| *index);
+    done.into_iter().map(|(_, result)| result).collect()
 }
 
 /// The command, what it covers, and the filters actually in effect. The
@@ -433,16 +504,27 @@ fn log_line(message: impl std::fmt::Display) {
 /// Decide what a new, fingerprinted path is: a copy of a file in this batch, a
 /// new location of a file in the catalog, or a new file. Only a fingerprint
 /// match leads to a full read, and only matching BLAKE3 values merge.
+#[allow(clippy::too_many_arguments)]
 fn plan_new_path(
     catalog: &Catalog,
     entries: &mut Vec<IngestEntry>,
     hashed: &mut HashMap<Uuid, (String, String)>,
     errors: &mut Vec<(String, String)>,
     report: &mut IngestReport,
+    path: &Path,
     seen: Seen,
     print: Fingerprint,
 ) -> Result<(), Error> {
-    let candidates = catalog.fingerprint_matches(seen.size, &print)?;
+    let mut candidates = catalog.fingerprint_matches(seen.size, &print)?;
+    // Rows written under an earlier scheme are compared in that scheme, so a
+    // copy of a file ingested before the scheme changed is still found. This
+    // reads the new path again only when a row of that size exists.
+    for scheme in catalog.other_schemes(seen.size, &print.scheme)? {
+        // A path that cannot be read here fails the full read below as well.
+        if let Ok(Some(theirs)) = hash::fingerprint_in(&scheme, path, seen.size as u64) {
+            candidates.extend(catalog.fingerprint_matches(seen.size, &theirs)?);
+        }
+    }
     let pending: Vec<usize> = entries
         .iter()
         .enumerate()
@@ -463,7 +545,7 @@ fn plan_new_path(
         });
         return Ok(());
     }
-    let mine = match hash::digest(Path::new(&seen.uri), seen.size as u64, false, false) {
+    let mine = match hash::digest(Path::new(&seen.uri), false, false) {
         Ok(digests) => digests.blake3,
         Err(err) => {
             // The fingerprint matched something, and this path could not be read
@@ -500,7 +582,7 @@ fn plan_new_path(
         };
         if blake3.is_none() {
             let first = &others[0];
-            match hash::digest(Path::new(&first.uri), first.size as u64, false, false) {
+            match hash::digest(Path::new(&first.uri), false, false) {
                 Ok(digests) => *blake3 = Some(digests.blake3),
                 Err(_) => {
                     unhashable.push(first.uri.clone());
@@ -564,7 +646,7 @@ fn hash_candidate(candidate: &Candidate) -> Option<(String, String)> {
         {
             return None;
         }
-        let digests = hash::digest(Path::new(&location.uri), meta.len(), false, false).ok()?;
+        let digests = hash::digest(Path::new(&location.uri), false, false).ok()?;
         Some((digests.blake3, location.uri.clone()))
     })
 }
@@ -716,14 +798,13 @@ fn observe(target: &ScanTarget, md5: bool, progress: &mut ScanProgress) -> ScanO
     let size = meta.len() as i64;
     let mtime = mtime_text(&meta);
     let stat_changed = Some(size) != target.last_size || mtime != target.last_mtime;
-    let want_fingerprint = stat_changed || !target.has_fingerprint;
-    let read = hash::digest_reporting(
-        Path::new(&target.uri),
-        meta.len(),
-        md5,
-        want_fingerprint,
-        |bytes| progress.read(bytes),
-    );
+    // A row under an earlier scheme moves to the current one here, where the
+    // bytes are read in full; the catalog keeps it only if BLAKE3 holds.
+    let want_fingerprint =
+        stat_changed || target.fingerprint_scheme.as_deref() != Some(hash::HEAD_SCHEME);
+    let read = hash::digest_reporting(Path::new(&target.uri), md5, want_fingerprint, |bytes| {
+        progress.read(bytes)
+    });
     match read {
         Ok(digests) => ScanOutcome::Present {
             size,
@@ -770,7 +851,7 @@ pub fn acknowledge(catalog: &mut Catalog, file: &FileRef, md5: bool) -> Result<A
                 location.uri
             )));
         }
-        let digests = hash::digest(Path::new(&location.uri), meta.len(), want_md5, true)
+        let digests = hash::digest(Path::new(&location.uri), want_md5, true)
             .map_err(|err| Error::Message(format!("{}: cannot read: {err}", location.uri)))?;
         let seen = Seen {
             uri: location.uri.clone(),

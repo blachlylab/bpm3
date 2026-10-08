@@ -335,7 +335,7 @@ fn scenario_10_ingest_creates_unlinked_rows_without_payload() {
         assert!(file["links"].as_array().unwrap().is_empty());
         assert!(file["size"].as_i64().unwrap() > 0);
         assert!(file["mtime"].as_str().unwrap().ends_with('Z'));
-        assert_eq!(file["fingerprint"]["scheme"], "xxh3-128-full");
+        assert_eq!(file["fingerprint"]["scheme"], "xxh3-128-head-256k");
         assert_eq!(file["fingerprint"]["hex"].as_str().unwrap().len(), 32);
         assert_eq!(file["locations"].as_array().unwrap().len(), 1);
         assert_eq!(file["locations"][0]["backend"], "posix");
@@ -789,7 +789,7 @@ fn a_new_file_already_committed_by_another_ingest_becomes_a_location() {
         .unwrap();
     let entry = IngestEntry::New {
         fingerprint: Some(Fingerprint {
-            scheme: "xxh3-128-full".into(),
+            scheme: "xxh3-128-head-256k".into(),
             hex: "0".repeat(32),
         }),
         blake3: Some(blake3.clone()),
@@ -809,7 +809,7 @@ fn a_new_file_already_committed_by_another_ingest_becomes_a_location() {
         blake3,
         md5: None,
         fingerprint: Fingerprint {
-            scheme: "xxh3-128-full".into(),
+            scheme: "xxh3-128-head-256k".into(),
             hex: "0".repeat(32),
         },
         present: Vec::new(),
@@ -820,6 +820,74 @@ fn a_new_file_already_committed_by_another_ingest_becomes_a_location() {
     assert_eq!(file.locations.len(), 2);
     drop(catalog);
     assert_eq!(env.count("files"), 1);
+}
+
+#[test]
+fn a_copy_of_a_file_fingerprinted_under_an_earlier_scheme_is_found() {
+    use xxhash_rust::xxh3::xxh3_128;
+
+    let env = Env::new("old-scheme");
+    let bytes = b"ACGT ingested before the head scheme\n";
+    let other = b"TGCA ingested before the head scheme\n";
+    let first = env.data().join("first");
+    write(&first.join("x.fq"), bytes);
+    write(&first.join("y.fq"), other);
+    env.ingest(&first);
+    // Rewrite both rows as an earlier build stored them.
+    let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+    for (name, content) in [("x.fq", &bytes[..]), ("y.fq", &other[..])] {
+        conn.execute(
+            "UPDATE files SET fingerprint_scheme = 'xxh3-128-full', fingerprint = ?
+             WHERE id = ?",
+            rusqlite::params![
+                format!("{:032x}", xxh3_128(content)),
+                env.id_at(&first.join(name))
+            ],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    let second = env.data().join("second");
+    write(&second.join("x.fq"), bytes);
+    let run = env.ingest(&second);
+    assert!(run.out.contains("1 copies"), "{}", run.out);
+    assert_eq!(env.count("files"), 2);
+    assert_eq!(
+        env.id_at(&second.join("x.fq")),
+        env.id_at(&first.join("x.fq"))
+    );
+}
+
+#[test]
+fn scan_moves_a_row_to_the_current_scheme_only_when_blake3_holds() {
+    let env = Env::new("upgrade");
+    let run42 = env.data().join("run42");
+    let kept = run42.join("kept.fq");
+    let changed = run42.join("changed.fq");
+    write(&kept, b"same bytes\n");
+    write(&changed, b"generation one\n");
+    env.ingest(&run42);
+    env.scan(&run42);
+    let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+    for path in [&kept, &changed] {
+        conn.execute(
+            "UPDATE files SET fingerprint_scheme = 'xxh3-128-full', fingerprint = ?
+             WHERE id = ?",
+            rusqlite::params!["0".repeat(32), env.id_at(path)],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    // Same size, new bytes: BLAKE3 no longer holds, so that row stays as is.
+    write(&changed, b"generation two\n");
+    set_mtime(&changed, "202001010000");
+    env.scan(&run42);
+    assert!(env.drift(&changed).contains(&"digest_mismatch".to_string()));
+    let scheme = |path: &Path| env.file_at(path)["fingerprint"]["scheme"].clone();
+    assert_eq!(scheme(&kept), "xxh3-128-head-256k");
+    assert_eq!(scheme(&changed), "xxh3-128-full");
 }
 
 #[test]

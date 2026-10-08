@@ -85,7 +85,7 @@ pub struct ScanTarget {
     pub uri: String,
     pub last_size: Option<i64>,
     pub last_mtime: Option<String>,
-    pub has_fingerprint: bool,
+    pub fingerprint_scheme: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +137,19 @@ pub struct FileQuery {
 impl Catalog {
     pub fn location_exists(&self, backend: &str, uri: &str) -> Result<bool, Error> {
         location_exists(&self.conn, backend, uri)
+    }
+
+    /// The fingerprint schemes other than `scheme` on files with this size.
+    pub fn other_schemes(&self, size: i64, scheme: &str) -> Result<Vec<String>, Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT fingerprint_scheme FROM files
+             WHERE size_bytes = ? AND fingerprint_scheme IS NOT NULL AND fingerprint_scheme <> ?
+             ORDER BY fingerprint_scheme",
+        )?;
+        let schemes = stmt
+            .query_map(params![size, scheme], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(schemes)
     }
 
     /// Files with this size and the same fingerprint scheme and value.
@@ -314,7 +327,7 @@ impl Catalog {
         limit: usize,
     ) -> Result<Vec<ScanTarget>, Error> {
         let (mut sql, mut values) = scan_query(
-            "SELECT l.file_id, l.backend, l.uri, l.last_size, l.last_mtime, f.fingerprint IS NOT NULL
+            "SELECT l.file_id, l.backend, l.uri, l.last_size, l.last_mtime, f.fingerprint_scheme
              FROM file_locations l JOIN files f ON f.id = l.file_id WHERE 1 = 1",
             scope,
             after,
@@ -332,7 +345,7 @@ impl Catalog {
                         uri: row.get(2)?,
                         last_size: row.get(3)?,
                         last_mtime: row.get(4)?,
-                        has_fingerprint: row.get(5)?,
+                        fingerprint_scheme: row.get(5)?,
                     },
                 ))
             })?
