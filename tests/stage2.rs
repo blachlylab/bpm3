@@ -436,6 +436,39 @@ fn ingest_logs_its_start_and_counts_every_hundred_files() {
 }
 
 #[test]
+fn scan_logs_its_total_and_counts_against_it() {
+    let env = Env::new("scan-progress");
+    let many = env.data().join("many");
+    for index in 0..101 {
+        write(&many.join(format!("f{index:03}.png")), b"12345678\n");
+    }
+    write(&many.join("skip.txt"), b"no");
+    ok(env.ingest(&many));
+    let run = ok(env.bpm(&["scan", many.to_str().unwrap(), "--whitelist", "*.png"]));
+    assert!(run.err.contains("bpm: scan /"), "{}", run.err);
+    assert!(run.err.contains("bpm: whitelist *.png"), "{}", run.err);
+    // The total is known before any location is read, after the filters.
+    assert!(
+        run.err.contains("bpm: 101 locations, 909 B to read"),
+        "{}",
+        run.err
+    );
+    // Through a pipe: a line every hundred locations, and one for the last.
+    assert!(
+        run.err.contains("bpm: 100/101 locations, 900 B of 909 B read"),
+        "{}",
+        run.err
+    );
+    assert!(
+        run.err.contains("bpm: 101/101 locations, 909 B of 909 B read"),
+        "{}",
+        run.err
+    );
+    assert!(!run.err.contains('\u{1b}'), "{}", run.err);
+    assert!(run.out.contains("101 locations, 101 ok"), "{}", run.out);
+}
+
+#[test]
 fn ingest_summary_counts_copies_without_listing_paths() {
     let env = Env::new("copies");
     let pics = env.data().join("pics");

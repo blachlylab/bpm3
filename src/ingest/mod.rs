@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -32,6 +32,11 @@ pub const BATCH: usize = 1000;
 /// How often the stderr count moves. A terminal rewrites one line; a pipe
 /// gets a new line, because a carriage return would not erase the last one.
 const PROGRESS_EVERY: u64 = 100;
+
+/// How often a scan's line moves between those counts, so one large file does
+/// not leave it still. A terminal redraws in place; a pipe gets fewer lines.
+const SCAN_REDRAW: Duration = Duration::from_millis(500);
+const SCAN_LOG_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default)]
 pub struct IngestReport {
@@ -123,7 +128,7 @@ pub fn ingest(
         )));
     }
     let root_uri = utf8(&root)?;
-    announce(&root, filter);
+    announce("ingest", &root.display().to_string(), filter);
     let run = catalog.start_run(RunKind::Ingest, POSIX, &root_uri)?;
     let mut report = IngestReport {
         run_id: Some(run.id),
@@ -251,10 +256,10 @@ fn ingest_batch(
     Ok(())
 }
 
-/// The directory and the filters actually in effect. The running count is
-/// separate: on a terminal it rewrites one line, every [`PROGRESS_EVERY`] files.
-fn announce(root: &Path, filter: &PathFilter) {
-    log_line(format!("ingest {}", root.display()));
+/// The command, what it covers, and the filters actually in effect. The
+/// running count is separate: on a terminal it rewrites one line.
+fn announce(command: &str, target: &str, filter: &PathFilter) {
+    log_line(format!("{command} {target}"));
     if let Some(list) = join_patterns(filter.whitelist_patterns()) {
         log_line(format!("whitelist {list}"));
     }
@@ -320,12 +325,100 @@ impl Drop for Progress {
 /// `tty` rewrites the current line: carriage return, erase to the end, then
 /// the count. A pipe cannot erase, so it gets a normal line.
 fn paint_progress(out: &mut impl Write, files: u64, tty: bool) -> io::Result<()> {
+    paint_line(out, &format!("{files} files seen"), tty)
+}
+
+fn paint_line(out: &mut impl Write, line: &str, tty: bool) -> io::Result<()> {
     if tty {
-        write!(out, "\r\x1b[Kbpm: {files} files seen")?;
+        write!(out, "\r\x1b[Kbpm: {line}")?;
     } else {
-        writeln!(out, "bpm: {files} files seen")?;
+        writeln!(out, "bpm: {line}")?;
     }
     out.flush()
+}
+
+/// A scan's place in a list whose length is known before it starts.
+struct ScanProgress {
+    total: u64,
+    total_bytes: u64,
+    done: u64,
+    bytes: u64,
+    last: Instant,
+    shown: bool,
+    tty: bool,
+}
+
+impl ScanProgress {
+    fn new() -> Self {
+        Self {
+            total: 0,
+            total_bytes: 0,
+            done: 0,
+            bytes: 0,
+            last: Instant::now(),
+            shown: false,
+            tty: std::io::stderr().is_terminal(),
+        }
+    }
+
+    /// One location finished. Every [`PROGRESS_EVERY`] locations and the last
+    /// one always draw.
+    fn location(&mut self) {
+        self.done += 1;
+        if self.done.is_multiple_of(PROGRESS_EVERY) || self.done == self.total || self.due() {
+            self.paint();
+        }
+    }
+
+    /// Bytes of the current location read.
+    fn read(&mut self, bytes: u64) {
+        self.bytes += bytes;
+        if self.due() {
+            self.paint();
+        }
+    }
+
+    fn due(&self) -> bool {
+        let every = if self.tty { SCAN_REDRAW } else { SCAN_LOG_EVERY };
+        self.last.elapsed() >= every
+    }
+
+    fn paint(&mut self) {
+        let line = format!(
+            "{}/{} locations, {} of {} read",
+            self.done,
+            self.total,
+            human_bytes(self.bytes),
+            human_bytes(self.total_bytes)
+        );
+        let _ = paint_line(&mut std::io::stderr(), &line, self.tty);
+        self.last = Instant::now();
+        self.shown = true;
+    }
+}
+
+impl Drop for ScanProgress {
+    fn drop(&mut self) {
+        // As for Progress: end the rewritten line before anything else prints.
+        if self.shown && self.tty {
+            eprintln!();
+        }
+    }
+}
+
+/// A byte count in binary units, to one decimal place above a KiB.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 fn log_line(message: impl std::fmt::Display) {
@@ -489,6 +582,21 @@ pub fn scan(
             root: Some(utf8(&walk::location_path(path)?)?),
         },
     };
+    announce(
+        "scan",
+        match arg {
+            ScanArg::All => "all",
+            ScanArg::Backend(backend) => backend,
+            ScanArg::Path(_) => scope.root.as_deref().unwrap_or_default(),
+        },
+        filter,
+    );
+    let mut progress = scan_totals(catalog, &scope, filter)?;
+    log_line(format!(
+        "{} locations, {} to read",
+        progress.total,
+        human_bytes(progress.total_bytes)
+    ));
     let run = catalog.start_run(
         RunKind::Scan,
         scope.backend.as_deref().unwrap_or(""),
@@ -498,7 +606,16 @@ pub fn scan(
         run_id: Some(run.id),
         ..ScanReport::default()
     };
-    let result = scan_pages(catalog, &run, &scope, filter, md5, &mut report);
+    let result = scan_pages(
+        catalog,
+        &run,
+        &scope,
+        filter,
+        md5,
+        &mut report,
+        &mut progress,
+    );
+    drop(progress);
     let seen = report.seen;
     catalog.finish_run(run, result.is_ok(), seen, 0)?;
     result.map(|()| report)
@@ -511,6 +628,7 @@ fn scan_pages(
     filter: &PathFilter,
     md5: bool,
     report: &mut ScanReport,
+    progress: &mut ScanProgress,
 ) -> Result<(), Error> {
     let mut after: Option<(String, String)> = None;
     loop {
@@ -521,19 +639,17 @@ fn scan_pages(
         after = Some((last.backend.clone(), last.uri.clone()));
         let mut results = Vec::with_capacity(page.len());
         for target in page {
-            let rel = match &scope.root {
-                Some(root) => relative(&target.uri, root),
-                None => target.uri.clone(),
-            };
-            if !filter.allows(&rel) {
+            if !in_filter(scope, filter, &target.uri) {
                 continue;
             }
             report.seen += 1;
             // Only the local filesystem can be read in this milestone.
             if target.backend != POSIX {
+                progress.location();
                 continue;
             }
-            let outcome = observe(&target, md5);
+            let outcome = observe(&target, md5, progress);
+            progress.location();
             results.push((target, outcome));
         }
         let states = catalog.apply_scan(run, &results)?;
@@ -555,8 +671,36 @@ fn scan_pages(
     }
 }
 
+/// Whether the path filters, matched against the scan root, keep a location.
+fn in_filter(scope: &ScanScope, filter: &PathFilter, uri: &str) -> bool {
+    match &scope.root {
+        Some(root) => filter.allows(&relative(uri, root)),
+        None => filter.allows(uri),
+    }
+}
+
+/// The locations a scan will visit and the bytes it expects to read, from the
+/// sizes the catalog last recorded. Only local locations are read.
+fn scan_totals(
+    catalog: &Catalog,
+    scope: &ScanScope,
+    filter: &PathFilter,
+) -> Result<ScanProgress, Error> {
+    let mut progress = ScanProgress::new();
+    catalog.scan_sizes(scope, |backend, uri, size| {
+        if !in_filter(scope, filter, uri) {
+            return;
+        }
+        progress.total += 1;
+        if backend == POSIX {
+            progress.total_bytes += size.unwrap_or(0).max(0) as u64;
+        }
+    })?;
+    Ok(progress)
+}
+
 /// Stat a location and, when it is there, read it once.
-fn observe(target: &ScanTarget, md5: bool) -> ScanOutcome {
+fn observe(target: &ScanTarget, md5: bool, progress: &mut ScanProgress) -> ScanOutcome {
     let meta = match fs::metadata(&target.uri) {
         Ok(meta) => meta,
         Err(err) if is_gone(&err) => return ScanOutcome::Missing,
@@ -569,7 +713,14 @@ fn observe(target: &ScanTarget, md5: bool) -> ScanOutcome {
     let mtime = mtime_text(&meta);
     let stat_changed = Some(size) != target.last_size || mtime != target.last_mtime;
     let want_fingerprint = stat_changed || !target.has_fingerprint;
-    match hash::digest(Path::new(&target.uri), meta.len(), md5, want_fingerprint) {
+    let read = hash::digest_reporting(
+        Path::new(&target.uri),
+        meta.len(),
+        md5,
+        want_fingerprint,
+        |bytes| progress.read(bytes),
+    );
+    match read {
         Ok(digests) => ScanOutcome::Present {
             size,
             mtime,
@@ -709,7 +860,16 @@ fn utf8(path: &Path) -> Result<String, Error> {
 
 #[cfg(test)]
 mod progress_tests {
-    use super::paint_progress;
+    use super::{human_bytes, paint_progress};
+
+    #[test]
+    fn bytes_read_in_binary_units() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1536 << 20), "1.5 GiB");
+        assert_eq!(human_bytes(100 << 40), "100.0 TiB");
+    }
 
     #[test]
     fn a_terminal_rewrites_one_line() {

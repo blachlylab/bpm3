@@ -56,11 +56,24 @@ pub fn fingerprint(path: &Path, size: u64) -> io::Result<Fingerprint> {
 /// is set the fingerprint is computed too, in the same pass for a file the
 /// full scheme covers.
 pub fn digest(path: &Path, size: u64, md5: bool, with_fingerprint: bool) -> io::Result<Digests> {
+    digest_reporting(path, size, md5, with_fingerprint, |_| {})
+}
+
+/// [`digest`], calling `on_read` with the length of each chunk of the full
+/// read as it arrives.
+pub fn digest_reporting(
+    path: &Path,
+    size: u64,
+    md5: bool,
+    with_fingerprint: bool,
+    mut on_read: impl FnMut(u64),
+) -> io::Result<Digests> {
     let mut file = File::open(path)?;
     let mut blake3 = blake3::Hasher::new();
     let mut md5 = md5.then(Md5::new);
     let mut xxh3 = (with_fingerprint && size <= SAMPLE_CUTOFF).then(Xxh3::new);
     stream(&mut file, |chunk| {
+        on_read(chunk.len() as u64);
         blake3.update(chunk);
         if let Some(md5) = md5.as_mut() {
             md5.update(chunk);

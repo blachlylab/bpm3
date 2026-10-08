@@ -281,6 +281,29 @@ impl Catalog {
         Ok(applied)
     }
 
+    /// Every location in scope, in `(backend, uri)` order, with the size the
+    /// last observation recorded. One streaming read, for a scan's totals.
+    pub fn scan_sizes(
+        &self,
+        scope: &ScanScope,
+        mut each: impl FnMut(&str, &str, Option<i64>),
+    ) -> Result<(), Error> {
+        let (mut sql, values) = scan_query(
+            "SELECT l.backend, l.uri, l.last_size FROM file_locations l WHERE 1 = 1",
+            scope,
+            None,
+        );
+        sql.push_str(" ORDER BY l.backend, l.uri");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params_from_iter(values))?;
+        while let Some(row) = rows.next()? {
+            let backend: String = row.get(0)?;
+            let uri: String = row.get(1)?;
+            each(&backend, &uri, row.get(2)?);
+        }
+        Ok(())
+    }
+
     /// Up to `limit` locations in scope after `after`, in `(backend, uri)`
     /// order. Each page is its own short read, so no read transaction stays
     /// open across a run.
@@ -290,35 +313,12 @@ impl Catalog {
         after: Option<&(String, String)>,
         limit: usize,
     ) -> Result<Vec<ScanTarget>, Error> {
-        let mut sql = String::from(
+        let (mut sql, mut values) = scan_query(
             "SELECT l.file_id, l.backend, l.uri, l.last_size, l.last_mtime, f.fingerprint IS NOT NULL
              FROM file_locations l JOIN files f ON f.id = l.file_id WHERE 1 = 1",
+            scope,
+            after,
         );
-        let mut values: Vec<Value> = Vec::new();
-        if let Some(backend) = &scope.backend {
-            sql.push_str(" AND l.backend = ?");
-            values.push(Value::Text(backend.clone()));
-        }
-        if let Some(root) = &scope.root {
-            // The location itself, or anything below it: a range on the key.
-            let prefix = if root.ends_with('/') {
-                root.clone()
-            } else {
-                format!("{root}/")
-            };
-            let mut upper = prefix.clone();
-            upper.pop();
-            upper.push('0');
-            sql.push_str(" AND (l.uri = ? OR (l.uri >= ? AND l.uri < ?))");
-            values.push(Value::Text(root.clone()));
-            values.push(Value::Text(prefix));
-            values.push(Value::Text(upper));
-        }
-        if let Some((backend, uri)) = after {
-            sql.push_str(" AND (l.backend, l.uri) > (?, ?)");
-            values.push(Value::Text(backend.clone()));
-            values.push(Value::Text(uri.clone()));
-        }
         sql.push_str(" ORDER BY l.backend, l.uri LIMIT ?");
         values.push(Value::Integer(limit as i64));
         let mut stmt = self.conn.prepare(&sql)?;
@@ -784,6 +784,41 @@ impl Catalog {
         )?;
         Ok(summary)
     }
+}
+
+/// `select` narrowed to the locations in `scope`, after `after` when given.
+fn scan_query(
+    select: &str,
+    scope: &ScanScope,
+    after: Option<&(String, String)>,
+) -> (String, Vec<Value>) {
+    let mut sql = String::from(select);
+    let mut values: Vec<Value> = Vec::new();
+    if let Some(backend) = &scope.backend {
+        sql.push_str(" AND l.backend = ?");
+        values.push(Value::Text(backend.clone()));
+    }
+    if let Some(root) = &scope.root {
+        // The location itself, or anything below it: a range on the key.
+        let prefix = if root.ends_with('/') {
+            root.clone()
+        } else {
+            format!("{root}/")
+        };
+        let mut upper = prefix.clone();
+        upper.pop();
+        upper.push('0');
+        sql.push_str(" AND (l.uri = ? OR (l.uri >= ? AND l.uri < ?))");
+        values.push(Value::Text(root.clone()));
+        values.push(Value::Text(prefix));
+        values.push(Value::Text(upper));
+    }
+    if let Some((backend, uri)) = after {
+        sql.push_str(" AND (l.backend, l.uri) > (?, ?)");
+        values.push(Value::Text(backend.clone()));
+        values.push(Value::Text(uri.clone()));
+    }
+    (sql, values)
 }
 
 fn grouped(conn: &Connection, sql: &str) -> Result<Vec<(String, i64)>, Error> {
