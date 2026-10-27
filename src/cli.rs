@@ -167,6 +167,9 @@ enum Command {
         /// List link runs, newest first.
         #[arg(long)]
         list: bool,
+        /// With --list: full ids, timestamps, role changes, and whole commands.
+        #[arg(long, requires = "list")]
+        full: bool,
         #[command(flatten)]
         show: ShowArgs,
         /// Remove entities without asking.
@@ -676,47 +679,67 @@ fn dispatch() -> Result<(), Error> {
         Command::Undo {
             run,
             list,
+            full,
             show,
             yes,
         } => {
             let mut catalog = open_write(cli.catalog.as_deref())?;
             if list {
                 let runs = catalog.link_runs()?;
+                if full {
+                    let rows: Vec<Vec<String>> = runs
+                        .into_iter()
+                        .map(|row| {
+                            vec![
+                                row.id,
+                                row.applied_at,
+                                row.entities_created.to_string(),
+                                row.links_created.to_string(),
+                                row.roles_changed.to_string(),
+                                row.undone_at.unwrap_or_default(),
+                                command_line(&row.command),
+                            ]
+                        })
+                        .collect();
+                    let headers = [
+                        "run",
+                        "applied_at",
+                        "entities",
+                        "links",
+                        "roles",
+                        "undone_at",
+                        "command",
+                    ];
+                    print!("{}", query::render_sql(&headers.map(String::from), &rows));
+                    return Ok(());
+                }
                 let ids: Vec<uuid::Uuid> = runs
                     .iter()
                     .filter_map(|row| uuid::Uuid::parse_str(&row.id).ok())
                     .collect();
                 let shared = catalog.shared_short_ids(IdSpace::LinkRuns, ids)?;
-                let rows: Vec<Vec<String>> = runs
+                let rows: Vec<(Vec<String>, query::Elastic)> = runs
                     .into_iter()
                     .map(|row| {
-                        vec![
-                            match uuid::Uuid::parse_str(&row.id) {
-                                Ok(id) => shown_id(id, &shared),
-                                Err(_) => row.id,
-                            },
-                            row.applied_at,
-                            row.entities_created.to_string(),
-                            row.links_created.to_string(),
-                            row.roles_changed.to_string(),
-                            row.undone_at.unwrap_or_default(),
-                            command_line(&row.command),
-                        ]
+                        (
+                            vec![
+                                match uuid::Uuid::parse_str(&row.id) {
+                                    Ok(id) => shown_id(id, &shared),
+                                    Err(_) => row.id,
+                                },
+                                minutes(&row.applied_at),
+                                if row.undone_at.is_some() { "yes" } else { "" }.to_string(),
+                                row.entities_created.to_string(),
+                                row.links_created.to_string(),
+                            ],
+                            query::Elastic::Text(link_arguments(&row.command)),
+                        )
                     })
                     .collect();
                 print!(
                     "{}",
-                    query::render_sql(
-                        &[
-                            "run",
-                            "applied_at",
-                            "entities",
-                            "links",
-                            "roles",
-                            "undone_at",
-                            "command"
-                        ]
-                        .map(String::from),
+                    query::render_compact(
+                        &["run", "applied", "undone", "entities", "links", "command"],
                         &rows
                     )
                 );
@@ -1278,6 +1301,32 @@ fn describe_counts(counts: &[(NodeType, usize)]) -> String {
 }
 
 /// The recorded argument vector, without the program name.
+/// `2026-10-27T22:25:13.700Z` as `2026-10-27 22:25`.
+fn minutes(stamp: &str) -> String {
+    stamp.get(..16).unwrap_or(stamp).replacen('T', " ", 1)
+}
+
+/// What a link run was asked to do: its arguments after `link`, without the
+/// global `--catalog`, which every run in one catalog shares.
+fn link_arguments(json: &str) -> String {
+    let Ok(args) = serde_json::from_str::<Vec<String>>(json) else {
+        return json.to_string();
+    };
+    let mut kept = Vec::new();
+    let mut rest = args.into_iter().skip(1);
+    while let Some(arg) = rest.next() {
+        if arg == "--catalog" {
+            rest.next();
+        } else if !arg.starts_with("--catalog=") {
+            kept.push(arg);
+        }
+    }
+    if kept.first().is_some_and(|arg| arg == "link") {
+        kept.remove(0);
+    }
+    kept.join(" ")
+}
+
 fn command_line(json: &str) -> String {
     serde_json::from_str::<Vec<String>>(json)
         .map(|args| args.into_iter().skip(1).collect::<Vec<_>>().join(" "))

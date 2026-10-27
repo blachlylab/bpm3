@@ -591,11 +591,23 @@ fn undo_removes_a_run_and_refuses_while_later_work_depends_on_it() {
     assert_eq!(env.count("files"), 2);
     let twice = fail(env.bpm(&["undo", &first, "--yes"]));
     assert!(twice.err.contains("was undone"), "{}", twice.err);
-    // The list shows short ids.
+    // The list shows short ids in 80 columns, without the catalog path and
+    // the leading `link`; --full shows everything.
     let list = ok(env.bpm(&["undo", "--list"])).out;
     assert!(
         list.contains(&first[24..]) && list.contains(&second[24..]) && !list.contains(&first),
         "{list}"
+    );
+    assert!(
+        list.lines().all(|line| line.chars().count() <= 80),
+        "{list}"
+    );
+    assert!(list.lines().nth(1).unwrap().contains(" yes "), "{list}");
+    assert!(!list.contains("--catalog"), "{list}");
+    let full = ok(env.bpm(&["undo", "--list", "--full"])).out;
+    assert!(
+        full.contains(&first) && full.contains("--catalog"),
+        "{full}"
     );
 
     // Metadata set on a created entity after the run blocks its undo.

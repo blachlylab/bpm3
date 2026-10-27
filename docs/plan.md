@@ -81,6 +81,7 @@ Scenario 41, in `tests/short_ids.rs`. From issues #1 and #4. PRD §4.2 has the r
 - A short id is exactly the last 12 hex digits of a UUID. It is accepted wherever an entity, file, or link run id is, and refused when two rows in its namespace share it.
 - V006 indexes `substr(id, 25)` on `files`, the six node tables, and `link_runs`.
 - `query entities` shows short ids, a path (`/P/J/...` below a Project), and the parent. `--full` keeps full ids.
+- Every readable table fits 80 columns: fixed columns at their widest value, and the last cut to fit (PRD §4.8). Issue #1.
 
 ## 5. Import, manifests, and materialize
 

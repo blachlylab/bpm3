@@ -289,7 +289,7 @@ fn query_files_table_is_compact_until_full() {
             .unwrap()
             .split_whitespace()
             .collect::<Vec<_>>(),
-        ["id", "size", "digest", "drift", "name", "links"]
+        ["id", "size", "drift", "links", "name"]
     );
     let row = compact.lines().nth(1).unwrap();
     assert!(row.contains(tail), "{row}");

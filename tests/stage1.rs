@@ -664,7 +664,15 @@ fn scenario_06_rename_and_reparent() {
     let after_rename = ok(bpm(
         home,
         home,
-        &["--catalog", cat, "query", "entities", "--type", "project"],
+        &[
+            "--catalog",
+            cat,
+            "query",
+            "entities",
+            "--type",
+            "project",
+            "--full",
+        ],
     ));
     assert!(
         after_rename.out.contains("/CLL2/WES-relapse"),
@@ -1122,7 +1130,12 @@ fn scenario_08_and_25_conventional_keys_are_data() {
         ));
         assert!(found.out.contains(short(id)), "{selector}\n{}", found.out);
     }
-    let all = ok(bpm(home, home, &["--catalog", cat, "query", "entities"]));
+    // The compact table may cut metadata to fit; --full shows all of it.
+    let all = ok(bpm(
+        home,
+        home,
+        &["--catalog", cat, "query", "entities", "--full"],
+    ));
     assert!(all.out.contains("embargo_until=2099-01-01"), "{}", all.out);
 }
 

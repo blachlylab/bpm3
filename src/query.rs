@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 
-use crate::model::{EntityRow, FileRow, Summary, shown_id};
+use crate::model::{Drift, EntityRow, FileRow, Summary, shown_id};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderFormat {
@@ -34,7 +34,7 @@ pub fn render_entities(
     const FULL: [&str; 6] = ["node_type", "id", "path", "project", "parent", "metadata"];
     match format {
         RenderFormat::Table => match layout {
-            Layout::Compact => render_table(
+            Layout::Compact => render_compact(
                 &COMPACT,
                 &rows
                     .iter()
@@ -80,11 +80,11 @@ pub fn render_files(
     shared: &HashSet<Uuid>,
 ) -> String {
     const FULL: [&str; 6] = ["id", "size", "digest", "drift", "locations", "links"];
-    const COMPACT: [&str; 6] = ["id", "size", "digest", "drift", "name", "links"];
+    const COMPACT: [&str; 5] = ["id", "size", "drift", "links", "name"];
     match format {
         RenderFormat::Table => match layout {
             Layout::Full => render_table(&FULL, &rows.iter().map(file_cells).collect::<Vec<_>>()),
-            Layout::Compact => render_table(
+            Layout::Compact => render_compact(
                 &COMPACT,
                 &rows
                     .iter()
@@ -234,31 +234,43 @@ fn entity_cells(row: &EntityRow) -> Vec<String> {
 
 /// Short ids. A Program or Project shows its own path; anything below shows
 /// its Project's path and `/...`, which is not an address, so it cannot be
-/// pasted back as one. A parent is its path, or its type and short id.
-fn compact_entity_cells(row: &EntityRow, shared: &HashSet<Uuid>) -> Vec<String> {
+/// pasted back as one. A parent is its path, or its short id; its type is
+/// always the one above the row's. Paths are cut to [`PATH_WIDTH`], and the
+/// metadata takes what is left.
+fn compact_entity_cells(row: &EntityRow, shared: &HashSet<Uuid>) -> (Vec<String>, Elastic) {
     let path = match (&row.path, &row.project) {
-        (Some(path), _) => path.clone(),
-        (None, Some(project)) => format!("{project}/..."),
+        (Some(path), _) => fit_path(path),
+        (None, Some(project)) => {
+            format!("{}/...", cut_middle(project, PATH_WIDTH - "/...".len(), 50))
+        }
         (None, None) => String::new(),
     };
-    vec![
-        shown_id(row.id, shared),
-        row.node_type.slug().to_string(),
-        path,
-        row.parent
-            .as_ref()
-            .map(|parent| {
-                parent.path.clone().unwrap_or_else(|| {
-                    format!(
-                        "{} {}",
-                        parent.node_type.slug(),
-                        shown_id(parent.id, shared)
-                    )
-                })
-            })
-            .unwrap_or_default(),
-        metadata_text(&row.metadata),
-    ]
+    let parent = row
+        .parent
+        .as_ref()
+        .map(|parent| match &parent.path {
+            Some(path) => fit_path(path),
+            None => shown_id(parent.id, shared),
+        })
+        .unwrap_or_default();
+    (
+        vec![
+            shown_id(row.id, shared),
+            row.node_type.slug().to_string(),
+            path,
+            parent,
+        ],
+        Elastic::Pairs(
+            row.metadata
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect(),
+        ),
+    )
+}
+
+fn fit_path(path: &str) -> String {
+    cut_middle(path, PATH_WIDTH, 50)
 }
 
 fn file_cells(row: &FileRow) -> Vec<String> {
@@ -280,37 +292,52 @@ fn file_cells(row: &FileRow) -> Vec<String> {
     ]
 }
 
-/// The same six columns, shortened to fit a terminal: the short id, a 1–3
-/// digit size, `algorithm:` plus the last 12 hex digits, the file name, and
-/// the short id of each link's entity.
-fn compact_cells(row: &FileRow, shared: &HashSet<Uuid>) -> Vec<String> {
-    vec![
-        shown_id(row.id, shared),
-        match row.size {
-            Some(size) if size >= 0 => compact_size(size as u64),
-            Some(size) => size.to_string(),
-            None => String::new(),
+/// Shortened to fit [`COMPACT_WIDTH`]: the short id, a 1–3 digit size, the
+/// worst drift state, a count of links, and one location's name with a count
+/// of the other copies. The name takes what the other columns leave.
+fn compact_cells(row: &FileRow, shared: &HashSet<Uuid>) -> (Vec<String>, Elastic) {
+    let drift = row.drift();
+    let worst = drift.iter().min_by_key(|state| severity(**state));
+    let name = row
+        .locations
+        .first()
+        .map(|location| base_name(&location.uri).to_string())
+        .unwrap_or_default();
+    (
+        vec![
+            shown_id(row.id, shared),
+            match row.size {
+                Some(size) if size >= 0 => compact_size(size as u64),
+                Some(size) => size.to_string(),
+                None => String::new(),
+            },
+            match worst {
+                Some(state) if drift.len() > 1 => format!("{}+", state.slug()),
+                Some(state) => state.slug().to_string(),
+                None => String::new(),
+            },
+            match row.links.len() {
+                0 => String::new(),
+                count => count.to_string(),
+            },
+        ],
+        Elastic::Name {
+            name,
+            copies: row.locations.len().saturating_sub(1),
         },
-        digest_tail(row),
-        drift_text(row),
-        row.locations
-            .iter()
-            .map(|location| base_name(&location.uri).to_string())
-            .collect::<Vec<_>>()
-            .join("; "),
-        row.links
-            .iter()
-            .map(|link| {
-                format!(
-                    "{} {} {}",
-                    link.node_type.slug(),
-                    shown_id(link.node_id, shared),
-                    link.role
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; "),
-    ]
+    )
+}
+
+/// Which drift state the compact table names when a file has several: the
+/// one most in need of attention.
+fn severity(state: Drift) -> u8 {
+    match state {
+        Drift::Missing => 0,
+        Drift::DigestMismatch => 1,
+        Drift::StatChanged => 2,
+        Drift::Unverified => 3,
+        Drift::Ok => 4,
+    }
 }
 
 fn drift_text(row: &FileRow) -> String {
@@ -327,20 +354,6 @@ fn blake3_wire(row: &FileRow) -> String {
         .find(|digest| digest.algorithm == "blake3")
         .map(|digest| digest.wire())
         .unwrap_or_default()
-}
-
-/// `algorithm:` and the last 12 hex digits. A shorter digest is shown whole.
-fn digest_tail(row: &FileRow) -> String {
-    let Some(digest) = row
-        .digests
-        .iter()
-        .find(|digest| digest.algorithm == "blake3")
-    else {
-        return String::new();
-    };
-    let hex = digest.hex.as_str();
-    let start = hex.len().saturating_sub(12);
-    format!("{}:{}", digest.algorithm, &hex[start..])
 }
 
 fn base_name(uri: &str) -> &str {
@@ -376,11 +389,11 @@ fn metadata_text(metadata: &std::collections::BTreeMap<String, String>) -> Strin
 }
 
 fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
-    let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
+    let mut widths: Vec<usize> = headers.iter().map(|header| display_width(header)).collect();
     for row in rows {
         for (index, cell) in row.iter().enumerate() {
             if index < widths.len() {
-                widths[index] = widths[index].max(cell.len());
+                widths[index] = widths[index].max(display_width(cell));
             }
         }
     }
@@ -398,16 +411,165 @@ fn push_row(out: &mut String, cells: &[&str], widths: &[usize]) {
         if index > 0 {
             out.push_str("  ");
         }
-        let width = widths.get(index).copied().unwrap_or(cell.len());
         out.push_str(cell);
         if index + 1 < cells.len() {
-            let pad = width.saturating_sub(cell.len());
-            for _ in 0..pad {
+            let width = widths.get(index).copied().unwrap_or(0);
+            for _ in display_width(cell)..width {
                 out.push(' ');
             }
         }
     }
     out.push('\n');
+}
+
+/// The widest line a compact table prints, unless a shared short id has to be
+/// shown in full.
+pub const COMPACT_WIDTH: usize = 80;
+
+/// The most a path takes in the compact entity table.
+const PATH_WIDTH: usize = 16;
+
+/// The last column of a compact table, fitted to the width the others leave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Elastic {
+    /// A file name and how many other copies the file has. The name is cut in
+    /// the middle, keeping more of the end; the count is never cut.
+    Name { name: String, copies: usize },
+    /// `key=value` pairs: as many whole pairs as fit, then `+N` for the rest.
+    Pairs(Vec<String>),
+    /// Cut at the end.
+    Text(String),
+}
+
+impl Elastic {
+    fn fit(&self, width: usize) -> String {
+        match self {
+            Self::Name { name, copies } => {
+                let suffix = match copies {
+                    0 => String::new(),
+                    copies => format!(" (+{copies})"),
+                };
+                let room = width.saturating_sub(display_width(&suffix));
+                format!("{}{suffix}", cut_middle(name, room, 70))
+            }
+            Self::Pairs(pairs) => {
+                let more = |shown: usize| match pairs.len() - shown {
+                    0 => String::new(),
+                    rest => format!(" +{rest}"),
+                };
+                let mut out = String::new();
+                for (index, pair) in pairs.iter().enumerate() {
+                    let joined = if out.is_empty() {
+                        pair.clone()
+                    } else {
+                        format!("{out}; {pair}")
+                    };
+                    if display_width(&joined) + display_width(&more(index + 1)) <= width {
+                        out = joined;
+                        continue;
+                    }
+                    if out.is_empty() {
+                        // Not even one whole pair fits: cut the first.
+                        let suffix = more(1);
+                        let room = width.saturating_sub(display_width(&suffix));
+                        return format!("{}{suffix}", cut_middle(pair, room, 60));
+                    }
+                    return format!("{out}{}", more(index));
+                }
+                out
+            }
+            Self::Text(text) => cut_end(text, width),
+        }
+    }
+}
+
+/// A table whose lines are at most [`COMPACT_WIDTH`] wide: every column but
+/// the last as wide as its widest cell, and the last fitted into the rest.
+pub fn render_compact(headers: &[&str], rows: &[(Vec<String>, Elastic)]) -> String {
+    let fixed = headers.len() - 1;
+    let mut widths: Vec<usize> = headers[..fixed]
+        .iter()
+        .map(|header| display_width(header))
+        .collect();
+    for (cells, _) in rows {
+        for (width, cell) in widths.iter_mut().zip(cells) {
+            *width = (*width).max(display_width(cell));
+        }
+    }
+    let used: usize = widths.iter().sum::<usize>() + 2 * fixed;
+    let room = COMPACT_WIDTH.saturating_sub(used);
+    let mut out = String::new();
+    push_row(&mut out, headers, &widths);
+    for (cells, last) in rows {
+        let last = last.fit(room);
+        let mut line: Vec<&str> = cells.iter().map(String::as_str).collect();
+        line.push(&last);
+        push_row(&mut out, &line, &widths);
+    }
+    out
+}
+
+/// How many columns a terminal gives `text`. Combining marks take none, so an
+/// accented letter counts once whether it is stored composed (`é`) or as `e`
+/// and a mark, as macOS file names often are. Wide East Asian characters are
+/// counted as one column, which is wrong, and not expected in a catalog.
+pub fn display_width(text: &str) -> usize {
+    text.chars().filter(|c| !is_combining(*c)).count()
+}
+
+fn is_combining(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F
+    )
+}
+
+/// `text` as letters with their combining marks, each one column wide.
+fn clusters(text: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut start = 0;
+    for (index, c) in text.char_indices() {
+        if index > start && !is_combining(c) {
+            out.push(&text[start..index]);
+            start = index;
+        }
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// `text` in at most `width` columns, its middle replaced by `…`. `tail` is the
+/// percentage of the kept columns that come from the end.
+pub fn cut_middle(text: &str, width: usize, tail: usize) -> String {
+    let parts = clusters(text);
+    if parts.len() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let kept = width - 1;
+    let from_end = (kept * tail + 50) / 100;
+    let from_start = kept - from_end;
+    format!(
+        "{}…{}",
+        parts[..from_start].concat(),
+        parts[parts.len() - from_end..].concat()
+    )
+}
+
+/// `text` in at most `width` columns, ending in `…` when it was cut.
+pub fn cut_end(text: &str, width: usize) -> String {
+    let parts = clusters(text);
+    if parts.len() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    format!("{}…", parts[..width - 1].concat())
 }
 
 fn render_csv(headers: &[&str], rows: &[Vec<String>]) -> String {
@@ -552,11 +714,11 @@ mod tests {
         assert_eq!(
             rendered,
             "\
-id            type     path          parent             metadata
-c9620b896c52  program  /CLL                             
-87231f3eb357  project  /CLL/WES      /CLL               
-95cf52f8ee52  case     /CLL/WES/...  /CLL/WES           subject_id=CLL-001
-bf9cceb2a884  sample   /CLL/WES/...  case 95cf52f8ee52  sample_kind=tumor
+id            type     path          parent        metadata
+c9620b896c52  program  /CLL                        
+87231f3eb357  project  /CLL/WES      /CLL          
+95cf52f8ee52  case     /CLL/WES/...  /CLL/WES      subject_id=CLL-001
+bf9cceb2a884  sample   /CLL/WES/...  95cf52f8ee52  sample_kind=tumor
 "
         );
     }
@@ -571,8 +733,9 @@ bf9cceb2a884  sample   /CLL/WES/...  case 95cf52f8ee52  sample_kind=tumor
             Layout::Compact,
             &HashSet::from([case]),
         );
+        // The row's own id and the sample's parent are both shown in full.
         assert!(rendered.contains(&format!("{case}  case")), "{rendered}");
-        assert!(rendered.contains(&format!("case {case}")), "{rendered}");
+        assert!(rendered.contains(&format!("...  {case}")), "{rendered}");
     }
 
     #[test]
@@ -613,7 +776,7 @@ bf9cceb2a884  sample   /CLL/WES/...  case 95cf52f8ee52  sample_kind=tumor
     }
 
     #[test]
-    fn compact_table_shortens_id_size_digest_name_and_links() {
+    fn compact_table_shows_worst_drift_a_link_count_and_one_name() {
         let rendered = render_files(
             &[sample()],
             RenderFormat::Table,
@@ -623,10 +786,135 @@ bf9cceb2a884  sample   /CLL/WES/...  case 95cf52f8ee52  sample_kind=tumor
         assert_eq!(
             rendered,
             "\
-id            size   digest               drift  name         links
-446655440000  2 KiB  blake3:abababababab  ok     a.fq; b.bam  raw_data 555555555555 data
+id            size   drift  links  name
+446655440000  2 KiB  ok     1      a.fq (+1)
 "
         );
+    }
+
+    /// Every line of `table` is at most [`COMPACT_WIDTH`] columns.
+    fn assert_fits(table: &str) {
+        for line in table.lines() {
+            assert!(
+                display_width(line) <= COMPACT_WIDTH,
+                "{} columns:\n{line}",
+                display_width(line)
+            );
+        }
+    }
+
+    #[test]
+    fn long_names_are_cut_in_the_middle_to_fit_eighty_columns() {
+        let mut row = sample();
+        row.size = Some(4 << 30);
+        row.locations[0].uri = "/data/run/SAMPLE_0042_S12_L001_R1_001.fastq.gz".into();
+        let mut long = row.clone();
+        long.locations[0].uri = format!("/data/{}.bam", "CLL-001_tumor_WES".repeat(6));
+        long.locations[0].presence = "missing".into();
+        let rendered = render_files(
+            &[row, long],
+            RenderFormat::Table,
+            Layout::Compact,
+            &HashSet::new(),
+        );
+        assert_fits(&rendered);
+        let lines: Vec<&str> = rendered.lines().collect();
+        // The usual Illumina name fits whole.
+        assert!(
+            lines[1].ends_with("SAMPLE_0042_S12_L001_R1_001.fastq.gz (+1)"),
+            "{rendered}"
+        );
+        // A long one keeps its start and more of its end, and the copy count.
+        assert!(lines[2].contains("CLL-001_tum…"), "{rendered}");
+        assert!(lines[2].ends_with("WES.bam (+1)"), "{rendered}");
+        assert!(lines[2].contains("missing+"), "{rendered}");
+        assert_eq!(display_width(lines[2]), COMPACT_WIDTH, "{rendered}");
+    }
+
+    #[test]
+    fn accented_names_count_one_column_per_letter_in_either_form() {
+        let composed = "R\u{e9}sum\u{e9}_\u{c5}ngstr\u{f6}m.fq";
+        let decomposed = "Re\u{301}sume\u{301}_A\u{30a}ngstro\u{308}m.fq";
+        assert_eq!(display_width(composed), 18);
+        assert_eq!(display_width(decomposed), 18);
+        // A cut never strips a mark from its letter.
+        for width in 2..18 {
+            let cut = cut_middle(decomposed, width, 70);
+            assert_eq!(display_width(&cut), width, "{cut}");
+            assert!(
+                !cut.contains("…\u{301}") && !cut.contains("…\u{30a}") && !cut.contains("…\u{308}"),
+                "{cut}"
+            );
+            let end = cut_end(decomposed, width);
+            assert_eq!(display_width(&end), width, "{end}");
+        }
+        let mut row = sample();
+        row.locations.truncate(1);
+        row.locations[0].uri = format!("/data/{decomposed}");
+        let mut other = row.clone();
+        other.locations[0].uri = format!("/data/{composed}");
+        let rendered = render_files(
+            &[row, other],
+            RenderFormat::Table,
+            Layout::Compact,
+            &HashSet::new(),
+        );
+        let widths: Vec<usize> = rendered.lines().map(display_width).collect();
+        assert_eq!(widths[1], widths[2], "{rendered}");
+    }
+
+    #[test]
+    fn long_paths_and_metadata_fit_eighty_columns() {
+        let mut rows = entities();
+        let program = "Chronic-Lymphocytic-Leukemia";
+        let project = "Whole-Exome-Relapse-Cohort-2026";
+        rows[0].path = Some(format!("/{program}"));
+        rows[1].path = Some(format!("/{program}/{project}"));
+        rows[1].parent.as_mut().unwrap().path = Some(format!("/{program}"));
+        for row in &mut rows[2..] {
+            row.project = Some(format!("/{program}/{project}"));
+        }
+        rows[2].parent.as_mut().unwrap().path = Some(format!("/{program}/{project}"));
+        rows[2].metadata.insert("consent".into(), "GRU".into());
+        rows[2]
+            .metadata
+            .insert("embargo_until".into(), "2027-01-01".into());
+        rows[3].metadata.insert(
+            "tissue".into(),
+            "bone_marrow_aspirate_from_left_iliac_crest".into(),
+        );
+        let rendered =
+            render_entities(&rows, RenderFormat::Table, Layout::Compact, &HashSet::new());
+        assert_fits(&rendered);
+        let lines: Vec<&str> = rendered.lines().collect();
+        // Paths are cut to sixteen, and a lower entity keeps the `/...`.
+        assert!(lines[2].contains("  /Chroni…ort-2026  "), "{rendered}");
+        assert!(lines[3].contains("  /Chro…t-2026/...  "), "{rendered}");
+        // A parent below a Project is its short id alone.
+        assert!(lines[4].contains("  95cf52f8ee52  "), "{rendered}");
+        // Whole pairs while they fit, then a count of the rest.
+        assert!(lines[3].ends_with("consent=GRU +2"), "{rendered}");
+        assert!(lines[4].ends_with("sample_kind=tumor +1"), "{rendered}");
+    }
+
+    #[test]
+    fn a_pair_too_long_for_the_column_is_cut() {
+        let pairs = Elastic::Pairs(vec![
+            "subject_id=CLL-0001-relapse-second-biopsy".into(),
+            "consent=GRU".into(),
+        ]);
+        let fitted = pairs.fit(20);
+        assert_eq!(display_width(&fitted), 20, "{fitted}");
+        assert!(
+            fitted.starts_with("subj") && fitted.ends_with(" +1"),
+            "{fitted}"
+        );
+        assert_eq!(
+            Elastic::Pairs(vec!["a=1".into(), "b=2".into()]).fit(20),
+            "a=1; b=2"
+        );
+        assert_eq!(Elastic::Text("abcdef".into()).fit(4), "abc…");
+        assert_eq!(cut_middle("abcdef", 0, 50), "");
     }
 
     #[test]
@@ -709,10 +997,9 @@ id            size   digest               drift  name         links
     }
 
     #[test]
-    fn a_missing_size_and_a_short_digest_stay_readable() {
+    fn a_missing_size_and_no_links_stay_readable() {
         let mut row = sample();
         row.size = None;
-        row.digests[0].hex = "abcd".into();
         row.locations.truncate(1);
         row.links.clear();
         let rendered = render_files(
@@ -722,16 +1009,15 @@ id            size   digest               drift  name         links
             &HashSet::new(),
         );
         let line = rendered.lines().nth(1).unwrap();
-        assert!(line.contains("blake3:abcd"));
-        assert!(line.contains("a.fq"));
-        assert!(!line.contains("KiB") && !line.contains(" B"));
+        assert!(line.ends_with("a.fq"), "{line}");
+        assert!(!line.contains("KiB") && !line.contains(" B"), "{line}");
     }
 
     #[test]
     fn a_negative_size_is_printed_as_the_integer() {
         let mut row = sample();
         row.size = Some(-3);
-        let cells = compact_cells(&row, &HashSet::new());
+        let (cells, _) = compact_cells(&row, &HashSet::new());
         assert_eq!(cells[1], "-3");
     }
 }
