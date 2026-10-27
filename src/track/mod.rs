@@ -658,24 +658,41 @@ fn hash_candidate(candidate: &Candidate) -> Option<(String, String)> {
     })
 }
 
-/// Check the selected locations. Up to `jobs` local locations are read at
-/// once; one reads them in path order, as a single spinning disk prefers.
+/// How a scan reads what it selects.
+#[derive(Debug, Clone)]
+pub struct ScanOptions {
+    /// Also compute and store MD5.
+    pub md5: bool,
+    /// Local locations read at once. One reads them in path order, as a
+    /// single spinning disk prefers.
+    pub jobs: usize,
+    /// Only locations in one of these states. Empty selects every state.
+    pub drift: Vec<Drift>,
+}
+
+/// Check the selected locations. Every selected location is read in full;
+/// `options.drift` narrows the selection, never the check.
 pub fn scan(
     catalog: &mut Catalog,
     arg: &ScanArg,
     filter: &PathFilter,
-    md5: bool,
-    jobs: usize,
+    options: &ScanOptions,
 ) -> Result<ScanReport, Error> {
+    let drift = options.drift.clone();
     let scope = match arg {
-        ScanArg::All => ScanScope::default(),
+        ScanArg::All => ScanScope {
+            drift,
+            ..ScanScope::default()
+        },
         ScanArg::Backend(backend) => ScanScope {
             backend: Some(backend.clone()),
             root: None,
+            drift,
         },
         ScanArg::Path(path) => ScanScope {
             backend: Some(POSIX.to_string()),
             root: Some(utf8(&walk::location_path(path)?)?),
+            drift,
         },
     };
     announce(
@@ -687,6 +704,12 @@ pub fn scan(
         },
         filter,
     );
+    if !scope.drift.is_empty() {
+        log_line(format!(
+            "only locations that are {}",
+            drift_list(&scope.drift)
+        ));
+    }
     let mut progress = scan_totals(catalog, &scope, filter)?;
     log_line(format!(
         "{} locations, {} to read",
@@ -707,8 +730,7 @@ pub fn scan(
         &run,
         &scope,
         filter,
-        md5,
-        jobs,
+        options,
         &mut report,
         &mut progress,
     );
@@ -718,14 +740,12 @@ pub fn scan(
     result.map(|()| report)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn scan_pages(
     catalog: &mut Catalog,
     run: &Run,
     scope: &ScanScope,
     filter: &PathFilter,
-    md5: bool,
-    jobs: usize,
+    options: &ScanOptions,
     report: &mut ScanReport,
     progress: &mut ScanProgress,
 ) -> Result<(), Error> {
@@ -752,8 +772,8 @@ fn scan_pages(
         // The reads run in parallel; the results come back in path order, so
         // the batch is applied exactly as a one-at-a-time scan would apply it.
         let shared = Mutex::new(&mut *progress);
-        let outcomes = parallel_map(&local, jobs, |target| {
-            let outcome = observe(target, md5, &shared);
+        let outcomes = parallel_map(&local, options.jobs, |target| {
+            let outcome = observe(target, options.md5, &shared);
             lock(&shared).location();
             outcome
         });
@@ -775,6 +795,15 @@ fn scan_pages(
             }
         }
     }
+}
+
+/// `unverified, stat_changed`: drift states as the flag spells them.
+pub fn drift_list(states: &[Drift]) -> String {
+    states
+        .iter()
+        .map(|state| state.slug())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Whether the path filters, matched against the scan root, keep a location.

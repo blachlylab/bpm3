@@ -105,6 +105,10 @@ enum Command {
         /// disk, where parallel reads make the head seek between files.
         #[arg(short, long, default_value_t = track::WORKERS, value_parser = jobs)]
         jobs: usize,
+        /// Only locations in this state, as `query files --drift` names them.
+        /// Repeatable. Every selected location is still read in full.
+        #[arg(long, value_enum)]
+        drift: Vec<DriftArg>,
         #[command(flatten)]
         filters: FilterArgs,
     },
@@ -541,16 +545,21 @@ fn dispatch() -> Result<(), Error> {
             target,
             md5,
             jobs,
+            drift,
             filters,
         } => {
             let filter = filters.build()?;
             let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
+            let options = track::ScanOptions {
+                md5,
+                jobs,
+                drift: drift.into_iter().map(Drift::from).collect(),
+            };
             let report = track::scan(
                 &mut catalog,
                 &ScanArg::parse(target.as_deref()),
                 &filter,
-                md5,
-                jobs,
+                &options,
             )?;
             for (uri, message) in &report.errors {
                 eprintln!("bpm: {uri}: {message}");
@@ -575,8 +584,14 @@ fn dispatch() -> Result<(), Error> {
             })
             .collect::<Vec<_>>()
             .join(", ");
+            // A narrowed scan says so, so it is not read as a full one.
+            let selected = if options.drift.is_empty() {
+                String::new()
+            } else {
+                format!(" (drift: {})", track::drift_list(&options.drift))
+            };
             println!(
-                "scan {}: {} locations, {counts}, {} errors",
+                "scan {}: {} locations{selected}, {counts}, {} errors",
                 report.run_id.map(|id| id.to_string()).unwrap_or_default(),
                 report.seen,
                 report.errors.len()

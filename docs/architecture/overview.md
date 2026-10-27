@@ -451,6 +451,7 @@ A scan argument that is a backend name (`posix`, `s3`) selects that backend. Any
 | `bpm scan` | Every location in the catalog, after the path filters |
 | `bpm scan s3` | Locations whose backend is `s3`, after the path filters. A file that also has a `posix` location is not checked there |
 | `bpm scan /data/run42` | Local-backend locations under that path, after the path filters |
+| `bpm scan --drift unverified /data/run42` | The same, narrowed to locations in that drift state. `--drift` repeats, and uses the predicates `query files --drift` uses |
 
 The `s3` row is the selection rule for the later object-store milestone. The first milestone records only `posix` locations, so that invocation selects nothing until the backend exists. A path with no backend is the local filesystem in every milestone.
 

@@ -1870,3 +1870,88 @@ fn a_version_2_catalog_keeps_its_links_and_their_roles_become_known() {
         "control",
     ]));
 }
+
+#[test]
+fn scan_drift_reads_only_the_locations_in_that_state() {
+    let env = Env::new("scan-drift");
+    let run = env.data().join("run");
+    write(&run.join("old.fq"), b"old reads\n");
+    write(&run.join("kept.fq"), b"kept reads\n");
+    env.track(&run);
+    env.scan(&run);
+    assert_eq!(env.drift(&run.join("old.fq")), ["ok"]);
+
+    // New arrivals are unverified until a scan reads them.
+    write(&run.join("new1.fq"), b"new reads 1\n");
+    write(&run.join("new2.fq"), b"new reads 2\n");
+    env.track(&run);
+    assert_eq!(env.drift(&run.join("new1.fq")), ["unverified"]);
+
+    // Corrupt a hashed file in place, keeping its size and mtime: only a full
+    // read can see it.
+    let old = run.join("old.fq");
+    let mtime = fs::metadata(&old).unwrap().modified().unwrap();
+    write(&old, b"OLD reads\n");
+    fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+
+    let narrow = ok(env.bpm(&["scan", "--drift", "unverified", run.to_str().unwrap()]));
+    assert!(
+        narrow
+            .err
+            .contains("bpm: only locations that are unverified"),
+        "{}",
+        narrow.err
+    );
+    assert!(narrow.err.contains("bpm: 2 locations"), "{}", narrow.err);
+    assert!(
+        narrow.out.contains("2 locations (drift: unverified), 2 ok"),
+        "{}",
+        narrow.out
+    );
+    assert_eq!(env.drift(&run.join("new1.fq")), ["ok"]);
+    assert_eq!(env.drift(&run.join("new2.fq")), ["ok"]);
+    // Not selected, so not read: the corruption is not seen, and `ok` still
+    // means what the last full read found.
+    assert_eq!(env.drift(&old), ["ok"]);
+    // Nothing is unverified now, so the same scan selects nothing.
+    let again = ok(env.bpm(&["scan", "--drift", "unverified", run.to_str().unwrap()]));
+    assert!(
+        again.out.contains("0 locations (drift: unverified)"),
+        "{}",
+        again.out
+    );
+
+    // A full scan reads everything and finds it.
+    let full = env.scan(&run);
+    assert!(full.out.contains("digest_mismatch"), "{}", full.out);
+    assert_eq!(env.drift(&old), ["digest_mismatch"]);
+
+    // --drift missing rechecks only what was missing; states repeat.
+    let kept = run.join("kept.fq");
+    let bytes = fs::read(&kept).unwrap();
+    fs::remove_file(&kept).unwrap();
+    env.scan(&run);
+    assert_eq!(env.drift(&kept), ["missing"]);
+    write(&kept, &bytes);
+    let back = ok(env.bpm(&[
+        "scan",
+        "--drift",
+        "missing",
+        "--drift",
+        "stat_changed",
+        run.to_str().unwrap(),
+    ]));
+    assert!(
+        back.out
+            .contains("1 locations (drift: missing, stat_changed)"),
+        "{}",
+        back.out
+    );
+    assert_ne!(env.drift(&kept), ["missing"]);
+    assert_eq!(env.drift(&old), ["digest_mismatch"]);
+}

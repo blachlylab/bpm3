@@ -76,6 +76,8 @@ pub struct TrackApplied {
 pub struct ScanScope {
     pub backend: Option<String>,
     pub root: Option<String>,
+    /// Only locations in one of these states. Empty selects every state.
+    pub drift: Vec<Drift>,
 }
 
 #[derive(Debug, Clone)]
@@ -782,6 +784,19 @@ fn scan_query(
         values.push(Value::Text(root.clone()));
         values.push(Value::Text(prefix));
         values.push(Value::Text(upper));
+    }
+    if !scope.drift.is_empty() {
+        // The same predicates `query files --drift` uses, on this location.
+        let states: Vec<&str> = scope
+            .drift
+            .iter()
+            .map(|state| drift_predicate(*state))
+            .collect();
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM file_locations x
+                          WHERE x.backend = l.backend AND x.uri = l.uri AND ({}))",
+            states.join(" OR ")
+        ));
     }
     if let Some((backend, uri)) = after {
         sql.push_str(" AND (l.backend, l.uri) > (?, ?)");
