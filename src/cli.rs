@@ -1,15 +1,18 @@
 //! Command line for the catalog notebook and the file indexer. Flag spelling
 //! for `bpm query` follows the PRD §4.8 sketch and may change.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::catalog::{self, AckOutcome, Catalog, EntityQuery, FileQuery, LinkOptions, SqlOutcome};
+use crate::catalog::{
+    self, AckOutcome, Catalog, EntityQuery, FileQuery, IdSpace, LinkOptions, SqlOutcome,
+};
 use crate::error::Error;
 use crate::link::{Expect, MatchOn, Renderer, Table, Template};
-use crate::model::{Drift, FileRef, NodeType};
+use crate::model::{Drift, FileRef, NodeType, shown_id};
 use crate::perms;
 use crate::query::{self, RenderFormat};
 use crate::track::filter::{self, FilterSpec, PathFilter};
@@ -322,6 +325,9 @@ enum QueryCmd {
         /// key:value, key:, or :value. Repeatable. All must match.
         #[arg(long = "where")]
         wheres: Vec<String>,
+        /// Table only: full ids, and each entity's own path, project, and parent.
+        #[arg(long)]
+        full: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: OutFmt,
     },
@@ -675,12 +681,20 @@ fn dispatch() -> Result<(), Error> {
         } => {
             let mut catalog = open_write(cli.catalog.as_deref())?;
             if list {
-                let rows: Vec<Vec<String>> = catalog
-                    .link_runs()?
+                let runs = catalog.link_runs()?;
+                let ids: Vec<uuid::Uuid> = runs
+                    .iter()
+                    .filter_map(|row| uuid::Uuid::parse_str(&row.id).ok())
+                    .collect();
+                let shared = catalog.shared_short_ids(IdSpace::LinkRuns, ids)?;
+                let rows: Vec<Vec<String>> = runs
                     .into_iter()
                     .map(|row| {
                         vec![
-                            row.id,
+                            match uuid::Uuid::parse_str(&row.id) {
+                                Ok(id) => shown_id(id, &shared),
+                                Err(_) => row.id,
+                            },
                             row.applied_at,
                             row.entities_created.to_string(),
                             row.links_created.to_string(),
@@ -820,6 +834,7 @@ fn dispatch() -> Result<(), Error> {
                 under,
                 kind,
                 wheres,
+                full,
                 format,
             } => {
                 let mut parsed = Vec::with_capacity(wheres.len());
@@ -832,7 +847,15 @@ fn dispatch() -> Result<(), Error> {
                     node_type: kind.map(NodeType::from),
                     wheres: parsed,
                 })?;
-                print!("{}", query::render_entities(&rows, format.into()));
+                let (layout, shared) = if full || !matches!(format, OutFmt::Table) {
+                    (query::Layout::Full, HashSet::new())
+                } else {
+                    (query::Layout::Compact, catalog.shared_in_entities(&rows)?)
+                };
+                print!(
+                    "{}",
+                    query::render_entities(&rows, format.into(), layout, &shared)
+                );
             }
             QueryCmd::Files {
                 under,
@@ -863,12 +886,15 @@ fn dispatch() -> Result<(), Error> {
                     );
                 } else {
                     let rows = catalog.query_files(&query)?;
-                    let layout = if full {
-                        query::FileLayout::Full
+                    let (layout, shared) = if full || !matches!(format, OutFmt::Table) {
+                        (query::Layout::Full, HashSet::new())
                     } else {
-                        query::FileLayout::Compact
+                        (query::Layout::Compact, catalog.shared_in_files(&rows)?)
                     };
-                    print!("{}", query::render_files(&rows, format.into(), layout));
+                    print!(
+                        "{}",
+                        query::render_files(&rows, format.into(), layout, &shared)
+                    );
                 }
             }
             QueryCmd::Impact { .. } => return Err(Error::NotThisMilestone("impact")),
@@ -1091,25 +1117,48 @@ fn run_untrack(
         plan.with_metadata(),
         if cascade { plan.links() } else { 0 }
     );
+    let refused = !cascade && plan.linked().next().is_some();
+    // Ids are shown short, or in full where another row shares the short id.
+    let mut shared = HashSet::new();
+    if show.detail || refused {
+        let files = plan
+            .files
+            .iter()
+            .filter_map(|file| uuid::Uuid::parse_str(&file.id).ok());
+        let nodes = plan
+            .files
+            .iter()
+            .flat_map(|file| &file.links)
+            .filter_map(|link| uuid::Uuid::parse_str(&link.node_id).ok());
+        shared = catalog.shared_short_ids(IdSpace::Files, files)?;
+        shared.extend(catalog.shared_short_ids(IdSpace::Entities, nodes)?);
+    }
+    let shown = |raw: &str| match uuid::Uuid::parse_str(raw) {
+        Ok(id) => shown_id(id, &shared),
+        Err(_) => raw.to_string(),
+    };
     if show.detail {
         for uri in &plan.locations {
             println!("location\t{uri}");
         }
         for file in &plan.files {
             for uri in &file.uris {
-                println!("file\t{}\t{uri}", file.id);
+                println!("file\t{}\t{uri}", shown(&file.id));
             }
             if cascade {
                 for link in &file.links {
                     println!(
                         "link\t{}\t{}\t{}\t{}",
-                        file.id, link.node_type, link.node_id, link.role
+                        shown(&file.id),
+                        link.node_type,
+                        shown(&link.node_id),
+                        link.role
                     );
                 }
             }
         }
     }
-    if !cascade && plan.linked().next().is_some() {
+    if refused {
         let lines: Vec<String> = plan
             .linked()
             .flat_map(|file| {
@@ -1117,7 +1166,9 @@ fn run_untrack(
                 file.links.iter().map(move |link| {
                     format!(
                         "linked\t{uri}\t{} {}\t{}",
-                        link.node_type, link.node_id, link.role
+                        link.node_type,
+                        shown(&link.node_id),
+                        link.role
                     )
                 })
             })

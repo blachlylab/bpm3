@@ -24,8 +24,8 @@ use uuid::Uuid;
 use crate::error::Error;
 use crate::migrate::{self, SchemaState};
 use crate::model::{
-    Address, EntityRow, FileRow, NodeType, Paged, Selector, Window, parse_address,
-    validate_meta_token, validate_name,
+    Address, EntityRow, FileRow, IdInput, NodeType, Paged, ParentRef, SHORT_ID_LEN, Selector,
+    Window, parse_address, validate_meta_token, validate_name,
 };
 use crate::perms;
 
@@ -41,6 +41,61 @@ pub use files::{
 pub use link::{Action, LinkOptions, LinkPlan, LinkRunRow, PlannedLink, UndoPlan};
 pub use runs::{Run, RunKind, lock_path};
 pub use untrack::{FileLink, RemovedFile, UntrackPlan, linked_error};
+
+/// The short id of an `id` column, in SQL: its last [`SHORT_ID_LEN`]
+/// characters. The V006 indexes are on this exact expression, so a lookup that
+/// spells it any other way scans the table.
+const SHORT_ID_SQL: &str = "substr(id, 25)";
+const _: () = assert!(36 - 24 == SHORT_ID_LEN);
+
+/// Where an id is looked up. A short id is unique, or refused, within one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdSpace {
+    Files,
+    /// All six node tables together, because an address can name any type.
+    Entities,
+    LinkRuns,
+}
+
+impl IdSpace {
+    fn source(self) -> &'static str {
+        match self {
+            Self::Files => "files",
+            Self::Entities => "entities",
+            Self::LinkRuns => "link_runs",
+        }
+    }
+}
+
+/// The one place an id from the command line becomes a row's id. `None` when
+/// no row has it. A short id that several rows share is refused, naming them.
+fn resolve_id(conn: &Connection, space: IdSpace, input: &IdInput) -> Result<Option<Uuid>, Error> {
+    let source = space.source();
+    let ids: Vec<String> = match input {
+        IdInput::Full(id) => {
+            let mut stmt = conn.prepare_cached(&format!("SELECT id FROM {source} WHERE id = ?"))?;
+            stmt.query_map([id.to_string()], |row| row.get(0))?
+                .collect::<Result<_, _>>()?
+        }
+        IdInput::Short(short) => {
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT id FROM {source} WHERE {SHORT_ID_SQL} = ? ORDER BY id"
+            ))?;
+            stmt.query_map([short.as_str()], |row| row.get(0))?
+                .collect::<Result<_, _>>()?
+        }
+    };
+    match ids.as_slice() {
+        [] => Ok(None),
+        [id] => Uuid::parse_str(id)
+            .map(Some)
+            .map_err(|err| Error::Message(format!("invalid id {id}: {err}"))),
+        _ => Err(Error::AmbiguousShortId {
+            short: input.to_string(),
+            ids,
+        }),
+    }
+}
 
 pub struct CatalogInfo {
     pub path: PathBuf,
@@ -100,6 +155,50 @@ struct Index {
 }
 
 impl Catalog {
+    /// The ids a compact entity table shows, each row's and its parent's,
+    /// that share their short id with another entity. Tables show those in full.
+    pub fn shared_in_entities(&mut self, rows: &[EntityRow]) -> Result<HashSet<Uuid>, Error> {
+        let ids = rows
+            .iter()
+            .flat_map(|row| [Some(row.id), row.parent.as_ref().map(|parent| parent.id)])
+            .flatten();
+        self.shared_short_ids(IdSpace::Entities, ids)
+    }
+
+    /// As [`Self::shared_in_entities`], for a file table: the file ids and the
+    /// entity ids of their links.
+    pub fn shared_in_files(&mut self, rows: &[FileRow]) -> Result<HashSet<Uuid>, Error> {
+        let mut shared = self.shared_short_ids(IdSpace::Files, rows.iter().map(|row| row.id))?;
+        let nodes = rows
+            .iter()
+            .flat_map(|row| row.links.iter().map(|link| link.node_id));
+        shared.extend(self.shared_short_ids(IdSpace::Entities, nodes)?);
+        Ok(shared)
+    }
+
+    /// The ids among `ids` whose short id another row in `space` also has.
+    /// Tables show those in full.
+    pub fn shared_short_ids(
+        &mut self,
+        space: IdSpace,
+        ids: impl IntoIterator<Item = Uuid>,
+    ) -> Result<HashSet<Uuid>, Error> {
+        let snapshot = self.conn.transaction()?;
+        let mut stmt = snapshot.prepare_cached(&format!(
+            "SELECT COUNT(*) FROM {} WHERE {SHORT_ID_SQL} = ?",
+            space.source()
+        ))?;
+        let mut shared = HashSet::new();
+        for id in ids {
+            let count: i64 =
+                stmt.query_row([crate::model::short_id(id).as_str()], |row| row.get(0))?;
+            if count > 1 {
+                shared.insert(id);
+            }
+        }
+        Ok(shared)
+    }
+
     pub fn open_read(path: &Path) -> Result<Self, Error> {
         require_file(path)?;
         let conn = readonly(path)?;
@@ -1159,6 +1258,9 @@ fn resolve_all(conn: &Connection, index: &Index, address: &str) -> Result<Vec<Uu
             (vec![anchor], selectors)
         }
         Address::Id { id, selectors } => {
+            let Some(id) = resolve_id(conn, IdSpace::Entities, &id)? else {
+                return Ok(Vec::new());
+            };
             if !index.by_id.contains_key(&id) {
                 return Ok(Vec::new());
             }
@@ -1265,11 +1367,21 @@ fn sorted_rows(index: &Index, ids: Vec<Uuid>) -> Result<Vec<EntityRow>, Error> {
         .into_iter()
         .map(|id| {
             let node = index.get(id);
+            let parent = match node.parent_id.and_then(|id| index.lookup(id)) {
+                Some(parent) => Some(ParentRef {
+                    node_type: parent.node_type,
+                    id: parent.id,
+                    path: path_of(parent, index)?,
+                }),
+                None => None,
+            };
             Ok(EntityRow {
                 node_type: node.node_type,
                 id: node.id,
                 path: path_of(node, index)?,
                 name: node.name.clone(),
+                parent,
+                project: project_of(node, index)?,
                 metadata: BTreeMap::new(),
             })
         })
@@ -1328,6 +1440,30 @@ fn path_of(node: &NodeRec, index: &Index) -> Result<Option<String>, Error> {
     })
 }
 
+/// For a Case or below, the path of the nearest named ancestor: its Project,
+/// or its Program when the Project is missing. `None` for programs and
+/// projects, which have their own path.
+fn project_of(node: &NodeRec, index: &Index) -> Result<Option<String>, Error> {
+    if matches!(node.node_type, NodeType::Program | NodeType::Project) {
+        return Ok(None);
+    }
+    let mut seen = HashSet::new();
+    let mut current = node.parent_id;
+    while let Some(id) = current {
+        if !seen.insert(id) {
+            break;
+        }
+        let Some(ancestor) = index.lookup(id) else {
+            break;
+        };
+        if let Some(path) = path_of(ancestor, index)? {
+            return Ok(Some(path));
+        }
+        current = ancestor.parent_id;
+    }
+    Ok(None)
+}
+
 fn map_write(err: rusqlite::Error) -> Error {
     if let rusqlite::Error::SqliteFailure(failure, _) = &err {
         match failure.extended_code {
@@ -1368,6 +1504,43 @@ fn format_value(value: ValueRef<'_>) -> String {
         ValueRef::Real(value) => value.to_string(),
         ValueRef::Text(value) | ValueRef::Blob(value) => {
             String::from_utf8_lossy(value).into_owned()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_id_lookups_use_the_v006_indexes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "application_id", migrate::APPLICATION_ID)
+            .unwrap();
+        migrate::apply(&mut conn).unwrap();
+        let plan = |source: &str| -> String {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN SELECT id FROM {source} WHERE {SHORT_ID_SQL} = ?"
+                ))
+                .unwrap();
+            stmt.query_map(["b393d8bb4c4e"], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n")
+        };
+        assert!(plan(IdSpace::Files.source()).contains("files_short_id"));
+        assert!(plan(IdSpace::LinkRuns.source()).contains("link_runs_short_id"));
+        // The view's lookup reaches every node table through its own index.
+        let entities = plan(IdSpace::Entities.source());
+        for table in [
+            "programs", "projects", "cases", "samples", "raw_data", "analyses",
+        ] {
+            assert!(
+                entities.contains(&format!("{table}_short_id")),
+                "{table}:\n{entities}"
+            );
         }
     }
 }

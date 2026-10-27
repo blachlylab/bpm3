@@ -507,7 +507,7 @@ pub(super) async fn file(
         return Err(WebError::not_found(format!("{id} is not a file id.")));
     };
     let (row, history) = read(&state, move |catalog| {
-        let file = FileRef::Id(id);
+        let file = FileRef::Id(id.into());
         Ok((catalog.file(&file)?, catalog.digest_history(&file)?))
     })
     .await?;

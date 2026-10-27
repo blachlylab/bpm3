@@ -23,7 +23,7 @@ use crate::catalog::{
     ScanTarget, Seen, TrackEntry,
 };
 use crate::error::Error;
-use crate::model::{BACKENDS, Drift, FileRef, FileRow, Fingerprint, POSIX};
+use crate::model::{BACKENDS, Drift, FileRef, FileRow, Fingerprint, POSIX, parse_id};
 use filter::PathFilter;
 use walk::{WalkItem, Walker};
 
@@ -102,9 +102,10 @@ pub enum AckReport {
     },
 }
 
-/// How the CLI names a file: a UUID is a file id, anything else a local path.
+/// How the CLI names a file: a full or short id is a file id, anything else a
+/// local path. Write `./name` for a file whose name looks like a short id.
 pub fn file_ref(raw: &str) -> Result<FileRef, Error> {
-    if let Ok(id) = Uuid::parse_str(raw) {
+    if let Some(id) = parse_id(raw) {
         return Ok(FileRef::Id(id));
     }
     let path = walk::location_path(Path::new(raw))?;
@@ -901,7 +902,7 @@ pub fn acknowledge(catalog: &mut Catalog, file: &FileRef, md5: bool) -> Result<A
         missing,
     };
     let outcome = catalog.acknowledge(&observed)?;
-    let file = catalog.file(&FileRef::Id(row.id))?;
+    let file = catalog.file(&FileRef::Id(row.id.into()))?;
     Ok(AckReport::Done { file, outcome })
 }
 

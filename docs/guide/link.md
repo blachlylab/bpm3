@@ -25,7 +25,7 @@ bpm link --to 01a116f9-9f5e-70ec-a2c9-b393d8bb4c4e --role data S1_R1.fq.gz
 bpm unlink --to /CLL/WES /data/irb/approval.pdf
 ```
 
-`--to` is any address `bpm` already accepts: a Program or Project path, an entity UUID, or a metadata path that matches exactly one entity. The file is a path to one of its locations, or its file id.
+`--to` is any address `bpm` already accepts: a Program or Project path, an entity UUID or its short id (the last 12 hex digits), or a metadata path that matches exactly one entity. The file is a path to one of its locations, or its file id or short id.
 
 ## The template
 

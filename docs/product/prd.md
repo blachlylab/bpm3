@@ -107,6 +107,8 @@ The same person enrolled in two projects is two Case nodes. The tree does not li
 
 File ids are independent of entity UUIDs and of Program and Project names. Renaming a Program or Project leaves file ids unchanged.
 
+Every command that takes an entity UUID, a file id, or a link run id also takes its short id: exactly the last 12 hex digits, the UUID's final group, in either case. Example: `01a116f9-9f5e-70ec-a2c9-b393d8bb4c4e` is also `b393d8bb4c4e`, and `b393d8bb4c4e/sample_kind:tumor` is a metadata path under it. Entities are one namespace, files another, and link runs a third. A short id that two rows in its namespace share is refused, and the message lists their full ids. Readable tables show short ids, except that an id whose short id is shared is shown in full, so a value copied from a table always resolves. `--full`, `--format csv`, and `--format json` show full ids. Twelve hex digits are read as an id before they are read as a path; `./b393d8bb4c4e` names a file with that name.
+
 An operator can delete an entity only when it has no children and no linked files. `--cascade` deletes the descendant entities and their file links. File rows that have no links left remain in the catalog as unlinked files. No delete command removes bytes from storage.
 
 Whether `name`, or a required metadata pair, should also be required on Case, Sample, Raw Data, or Analysis is still open.
@@ -261,7 +263,7 @@ Command history is a third, weaker record: an append-only log of CLI and web act
 | `lineage FILE` | Derived-from ancestors and descendants of one file, with the entities those files are linked to. |
 | `summary` | Counts and bytes by entity type, by `sample_kind`, by `assay`, by storage backend; plus unlinked count and drift counts. |
 
-Default output is a readable table. `--format csv` and `--format json` are stable enough for scripts. Dates are UTC ISO 8601. Program and Project rows include their path. Other entity rows include their UUID.
+Default output is a readable table. `--format csv` and `--format json` are stable enough for scripts. Dates are UTC ISO 8601. The entity table shows each row's short id (§4.2), its type, a path, its parent, and its metadata. Program and Project rows show their own path. A Case or anything below shows its Project's path followed by `/...`, which marks where it sits and is not an address. The parent is a path for a Program or Project, and otherwise its type and short id. `--full` shows full ids, and a separate `project` column. CSV and JSON carry `path`, `project`, and the parent's type, id, and path as fields.
 
 `bpm sql` runs a statement against a local catalog. The default is read-only. `--write` is required for a statement that changes rows. Recording that write in the command history waits for the §4.7 milestone. A remote Govern catalog does not accept `bpm sql` in the first server release; remote clients use `bpm query`, which goes through policy filtering.
 
@@ -448,6 +450,7 @@ Scenarios below describe Core behavior. A scenario marked deferred or unstable b
 38. **Roles.** A role with an uppercase letter is refused. A role new to the catalog is refused without `--new-role`. Linking an existing pair with another role is refused without `--set-role`.
 39. **Undo.** `bpm undo` of a link run removes its links and the entities it created and keeps the file rows. It refuses while a later link run has linked files to those entities, and names that run. After that run is undone, it succeeds. Undo of a `--set-role` run restores the old role.
 40. **Untrack.** A file tracked at two paths keeps its id, digests, and links when one path is untracked, and tracking that path again adds the location back to the same id. Untracking the second path removes the file row. A path deleted from disk can be untracked. A linked file's last location is refused, names the file, and changes nothing; with `--cascade` the file and its links go and the entity stays. A whitelist removes only the locations it admits and the summary counts the rest. Without a terminal and without `--yes`, a plan that removes a file row refuses and writes nothing.
+41. **Short ids.** Each command that takes an entity, file, or link run id accepts its last 12 hex digits in either case, with metadata path segments after an entity's. Eleven or thirteen digits are refused. When two files share a short id, naming it fails and lists both full ids, and the file table shows both in full. A file named with twelve hex digits is reached as `./name`.
 
 ### 4.16 Core release slices
 

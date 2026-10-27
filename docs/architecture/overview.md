@@ -588,6 +588,8 @@ Clap 4 derive parser. The binary name is `bpm`. The subcommands Core implements 
 
 Output goes to stdout. Diagnostics go to stderr. Exit status is `0` on success and non-zero on a rejected command. `bpm track` and `bpm scan` also exit non-zero when any path could not be read. The paths they could read are committed first.
 
+Ids on the command line follow PRD §4.2. `model::parse_id` is the only parser of an id typed on the command line, and `model::short_id` and `model::shown_id` are the only producers of a short one. The catalog's `resolve_id` is the only place a short id becomes a row id. It looks in one of three spaces (files, the `entities` view, `link_runs`) on `substr(id, 25)`, the expression V006 indexes on each table. A test checks that every lookup uses those indexes. A table asks the catalog which of its ids share a short id, and shows those in full.
+
 `bpm delete` takes an entity and never touches bytes on disk. `bpm untrack PATH…` removes file locations and file rows, as described in §6. `bpm link --to TEMPLATE --role ROLE FILE…` and `bpm unlink --to TEMPLATE FILE…` name a file by its id or by one of its location paths, and also take a directory, which reaches every catalog location below it. The template grammar is [ADR 0002](../adr/0002-link-templates.md).
 
 `bpm login`, `bpm logout`, and `bpm use` are marked `*` in PRD §4.13. Core does not register them. The token typed into `bpm serve` is not `bpm login`. When a Govern client exists, those commands with no server configured fail with a short message, and they do not report that a login succeeded.

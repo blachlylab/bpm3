@@ -74,6 +74,14 @@ Scenario 40, in `tests/untrack.rs`. Issue #5. The [untrack guide](guide/untrack.
 - V005 adds `untrack_runs`.
 - `bpm delete` loses `--location` and `--file`. Tests that used them move to untrack.
 
+## 4c. Short ids and the compact entity table
+
+Scenario 41, in `tests/short_ids.rs`. From issues #1 and #4. PRD §4.2 has the rule, and §4.8 the table.
+
+- A short id is exactly the last 12 hex digits of a UUID. It is accepted wherever an entity, file, or link run id is, and refused when two rows in its namespace share it.
+- V006 indexes `substr(id, 25)` on `files`, the six node tables, and `link_runs`.
+- `query entities` shows short ids, a path (`/P/J/...` below a Project), and the parent. `--full` keeps full ids.
+
 ## 5. Import, manifests, and materialize
 
 Starts when PRD §4.9 and §4.10 are no longer marked unstable. Scenarios 23, 24, and 26.

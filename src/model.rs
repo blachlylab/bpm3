@@ -1,6 +1,8 @@
-//! Entity rules that do not need a database: names, metadata tokens, and addresses.
+//! Entity rules that do not need a database: names, metadata tokens,
+//! addresses, and short ids.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 
 use uuid::Uuid;
 
@@ -186,8 +188,78 @@ pub fn parse_selector(raw: &str) -> Result<Selector, ModelError> {
     }
 }
 
-/// A command address: a `/program[/project][/selector...]` path, or a UUID with
-/// optional selector segments.
+/// Hex digits in a short id: the last group of a hyphenated UUID. In a v7 id
+/// that group is the low 16 bits of the per-millisecond counter and 32 random
+/// bits, so ids made in the same millisecond never share it.
+pub const SHORT_ID_LEN: usize = 12;
+
+/// The last [`SHORT_ID_LEN`] hex digits of an id, lowercase. Made only by
+/// [`short_id`] and [`parse_id`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ShortId(String);
+
+impl ShortId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ShortId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// An id as a command names it: in full, or by its short id. The catalog
+/// resolves either to one row, or refuses a short id that several rows share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdInput {
+    Full(Uuid),
+    Short(ShortId),
+}
+
+impl From<Uuid> for IdInput {
+    fn from(id: Uuid) -> Self {
+        Self::Full(id)
+    }
+}
+
+impl fmt::Display for IdInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Full(id) => write!(f, "{id}"),
+            Self::Short(short) => write!(f, "{short}"),
+        }
+    }
+}
+
+/// The short id of `id`.
+pub fn short_id(id: Uuid) -> ShortId {
+    let text = id.hyphenated().to_string();
+    ShortId(text[text.len() - SHORT_ID_LEN..].to_string())
+}
+
+/// An id typed on the command line: a UUID, or exactly [`SHORT_ID_LEN`] hex
+/// digits in either case. Anything else is not an id.
+pub fn parse_id(raw: &str) -> Option<IdInput> {
+    if raw.len() == SHORT_ID_LEN && raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Some(IdInput::Short(ShortId(raw.to_ascii_lowercase())));
+    }
+    Uuid::parse_str(raw).ok().map(IdInput::Full)
+}
+
+/// How a table shows an id: its short id, or the full UUID when `shared`
+/// says another row has the same short id, so what is shown always resolves.
+pub fn shown_id(id: Uuid, shared: &HashSet<Uuid>) -> String {
+    if shared.contains(&id) {
+        id.to_string()
+    } else {
+        short_id(id).to_string()
+    }
+}
+
+/// A command address: a `/program[/project][/selector...]` path, or an id
+/// (full or short) with optional selector segments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Address {
     Path {
@@ -196,7 +268,7 @@ pub enum Address {
         selectors: Vec<Selector>,
     },
     Id {
-        id: Uuid,
+        id: IdInput,
         selectors: Vec<Selector>,
     },
 }
@@ -232,7 +304,7 @@ pub fn parse_address(input: &str) -> Result<Address, ModelError> {
         })
     } else {
         let mut parts = input.split('/');
-        let id = Uuid::parse_str(parts.next().unwrap_or("")).map_err(|_| ModelError::Address)?;
+        let id = parse_id(parts.next().unwrap_or("")).ok_or(ModelError::Address)?;
         let mut selectors = Vec::new();
         for part in parts {
             if part.is_empty() {
@@ -245,13 +317,26 @@ pub fn parse_address(input: &str) -> Result<Address, ModelError> {
 }
 
 /// One entity as query returns it. `path` is set for programs and projects.
+/// `project` is the path of the Project, or the Program, a lower entity sits
+/// in; it is unset on programs and projects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityRow {
     pub node_type: NodeType,
     pub id: Uuid,
     pub path: Option<String>,
     pub name: Option<String>,
+    pub parent: Option<ParentRef>,
+    pub project: Option<String>,
     pub metadata: BTreeMap<String, String>,
+}
+
+/// An entity's parent: its type and id, and its path when it is a Program or
+/// a Project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentRef {
+    pub node_type: NodeType,
+    pub id: Uuid,
+    pub path: Option<String>,
 }
 
 /// The local filesystem backend. The only one this milestone writes.
@@ -272,7 +357,7 @@ pub struct Fingerprint {
 /// How a command names one file: its id, or one of its locations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileRef {
-    Id(Uuid),
+    Id(IdInput),
     Location { backend: String, uri: String },
 }
 
@@ -536,6 +621,41 @@ mod tests {
     }
 
     #[test]
+    fn a_short_id_is_the_last_group_and_parses_back() {
+        let id = Uuid::parse_str("01a116f9-9f5e-70ec-a2c9-b393d8bb4c4e").unwrap();
+        let short = short_id(id);
+        assert_eq!(short.as_str(), "b393d8bb4c4e");
+        assert_eq!(
+            parse_id("b393d8bb4c4e"),
+            Some(IdInput::Short(short.clone()))
+        );
+        assert_eq!(parse_id("B393D8BB4C4E"), Some(IdInput::Short(short)));
+        assert_eq!(parse_id(&id.to_string()), Some(IdInput::Full(id)));
+        // Exactly twelve hex digits, nothing shorter, longer, or not hex.
+        for raw in [
+            "b393d8bb4c4",
+            "b393d8bb4c4e0",
+            "b393d8bb4c4g",
+            "",
+            "notes.txt",
+        ] {
+            assert_eq!(parse_id(raw), None, "{raw}");
+        }
+        let mut shared = HashSet::new();
+        assert_eq!(shown_id(id, &shared), "b393d8bb4c4e");
+        shared.insert(id);
+        assert_eq!(shown_id(id, &shared), id.to_string());
+        let addr = parse_address("b393d8bb4c4e/sample_kind:aliquot").unwrap();
+        assert!(matches!(
+            addr,
+            Address::Id {
+                id: IdInput::Short(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn uuid_address_is_not_a_program_name() {
         let id = Uuid::now_v7();
         assert_eq!(id.get_version(), Some(uuid::Version::SortRand));
@@ -545,7 +665,7 @@ mod tests {
                 id: parsed,
                 selectors,
             } => {
-                assert_eq!(parsed, id);
+                assert_eq!(parsed, IdInput::Full(id));
                 assert_eq!(selectors.len(), 1);
             }
             Address::Path { .. } => panic!("uuid parsed as a path"),

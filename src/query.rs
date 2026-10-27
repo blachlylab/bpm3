@@ -1,6 +1,10 @@
 //! Rendering for `bpm query` and `bpm sql`. No database access.
 
-use crate::model::{EntityRow, FileRow, Summary};
+use std::collections::HashSet;
+
+use uuid::Uuid;
+
+use crate::model::{EntityRow, FileRow, Summary, shown_id};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderFormat {
@@ -9,23 +13,37 @@ pub enum RenderFormat {
     Json,
 }
 
-/// How much of a file row the table prints. CSV and JSON ignore this and
-/// always print the full values.
+/// How much of a row the table prints. CSV and JSON ignore this and always
+/// print the full values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileLayout {
+pub enum Layout {
     Compact,
     Full,
 }
 
-pub fn render_entities(rows: &[EntityRow], format: RenderFormat) -> String {
-    const HEADERS: [&str; 4] = ["node_type", "id", "path", "metadata"];
+/// One row per entity. The compact table shows short ids, and for a Case or
+/// below the path of its Project with `/...`. `shared` holds the ids whose
+/// short id another row also has; those are shown in full.
+pub fn render_entities(
+    rows: &[EntityRow],
+    format: RenderFormat,
+    layout: Layout,
+    shared: &HashSet<Uuid>,
+) -> String {
+    const COMPACT: [&str; 5] = ["id", "type", "path", "parent", "metadata"];
+    const FULL: [&str; 6] = ["node_type", "id", "path", "project", "parent", "metadata"];
     match format {
-        RenderFormat::Table => {
-            render_table(&HEADERS, &rows.iter().map(entity_cells).collect::<Vec<_>>())
-        }
-        RenderFormat::Csv => {
-            render_csv(&HEADERS, &rows.iter().map(entity_cells).collect::<Vec<_>>())
-        }
+        RenderFormat::Table => match layout {
+            Layout::Compact => render_table(
+                &COMPACT,
+                &rows
+                    .iter()
+                    .map(|row| compact_entity_cells(row, shared))
+                    .collect::<Vec<_>>(),
+            ),
+            Layout::Full => render_table(&FULL, &rows.iter().map(entity_cells).collect::<Vec<_>>()),
+        },
+        RenderFormat::Csv => render_csv(&FULL, &rows.iter().map(entity_cells).collect::<Vec<_>>()),
         RenderFormat::Json => {
             let items: Vec<serde_json::Value> = rows
                 .iter()
@@ -34,6 +52,12 @@ pub fn render_entities(rows: &[EntityRow], format: RenderFormat) -> String {
                         "node_type": row.node_type.slug(),
                         "id": row.id.to_string(),
                         "path": row.path,
+                        "project": row.project,
+                        "parent": row.parent.as_ref().map(|parent| serde_json::json!({
+                            "node_type": parent.node_type.slug(),
+                            "id": parent.id.to_string(),
+                            "path": parent.path,
+                        })),
                         "metadata": row.metadata,
                     })
                 })
@@ -47,18 +71,25 @@ pub fn render_entities(rows: &[EntityRow], format: RenderFormat) -> String {
 }
 
 /// One row per file. Table and CSV join several locations or links with `; `.
-/// The table follows `layout`. CSV and JSON stay full either way.
-pub fn render_files(rows: &[FileRow], format: RenderFormat, layout: FileLayout) -> String {
+/// The table follows `layout`. CSV and JSON stay full either way. `shared`
+/// is as for [`render_entities`], over file ids and linked entity ids.
+pub fn render_files(
+    rows: &[FileRow],
+    format: RenderFormat,
+    layout: Layout,
+    shared: &HashSet<Uuid>,
+) -> String {
     const FULL: [&str; 6] = ["id", "size", "digest", "drift", "locations", "links"];
     const COMPACT: [&str; 6] = ["id", "size", "digest", "drift", "name", "links"];
     match format {
         RenderFormat::Table => match layout {
-            FileLayout::Full => {
-                render_table(&FULL, &rows.iter().map(file_cells).collect::<Vec<_>>())
-            }
-            FileLayout::Compact => render_table(
+            Layout::Full => render_table(&FULL, &rows.iter().map(file_cells).collect::<Vec<_>>()),
+            Layout::Compact => render_table(
                 &COMPACT,
-                &rows.iter().map(compact_cells).collect::<Vec<_>>(),
+                &rows
+                    .iter()
+                    .map(|row| compact_cells(row, shared))
+                    .collect::<Vec<_>>(),
             ),
         },
         RenderFormat::Csv => render_csv(&FULL, &rows.iter().map(file_cells).collect::<Vec<_>>()),
@@ -187,6 +218,45 @@ fn entity_cells(row: &EntityRow) -> Vec<String> {
         row.node_type.slug().to_string(),
         row.id.to_string(),
         row.path.clone().unwrap_or_default(),
+        row.project.clone().unwrap_or_default(),
+        row.parent
+            .as_ref()
+            .map(|parent| {
+                parent
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| format!("{} {}", parent.node_type.slug(), parent.id))
+            })
+            .unwrap_or_default(),
+        metadata_text(&row.metadata),
+    ]
+}
+
+/// Short ids. A Program or Project shows its own path; anything below shows
+/// its Project's path and `/...`, which is not an address, so it cannot be
+/// pasted back as one. A parent is its path, or its type and short id.
+fn compact_entity_cells(row: &EntityRow, shared: &HashSet<Uuid>) -> Vec<String> {
+    let path = match (&row.path, &row.project) {
+        (Some(path), _) => path.clone(),
+        (None, Some(project)) => format!("{project}/..."),
+        (None, None) => String::new(),
+    };
+    vec![
+        shown_id(row.id, shared),
+        row.node_type.slug().to_string(),
+        path,
+        row.parent
+            .as_ref()
+            .map(|parent| {
+                parent.path.clone().unwrap_or_else(|| {
+                    format!(
+                        "{} {}",
+                        parent.node_type.slug(),
+                        shown_id(parent.id, shared)
+                    )
+                })
+            })
+            .unwrap_or_default(),
         metadata_text(&row.metadata),
     ]
 }
@@ -210,12 +280,12 @@ fn file_cells(row: &FileRow) -> Vec<String> {
     ]
 }
 
-/// The same six columns, shortened to fit a terminal: the UUID's last group,
-/// a 1–3 digit size, `algorithm:` plus the last 12 hex digits, the file name,
-/// and the same shortening on each link's entity id.
-fn compact_cells(row: &FileRow) -> Vec<String> {
+/// The same six columns, shortened to fit a terminal: the short id, a 1–3
+/// digit size, `algorithm:` plus the last 12 hex digits, the file name, and
+/// the short id of each link's entity.
+fn compact_cells(row: &FileRow, shared: &HashSet<Uuid>) -> Vec<String> {
     vec![
-        uuid_tail(row.id),
+        shown_id(row.id, shared),
         match row.size {
             Some(size) if size >= 0 => compact_size(size as u64),
             Some(size) => size.to_string(),
@@ -234,7 +304,7 @@ fn compact_cells(row: &FileRow) -> Vec<String> {
                 format!(
                     "{} {} {}",
                     link.node_type.slug(),
-                    uuid_tail(link.node_id),
+                    shown_id(link.node_id, shared),
                     link.role
                 )
             })
@@ -271,15 +341,6 @@ fn digest_tail(row: &FileRow) -> String {
     let hex = digest.hex.as_str();
     let start = hex.len().saturating_sub(12);
     format!("{}:{}", digest.algorithm, &hex[start..])
-}
-
-/// The last group of a hyphenated UUID, 12 hex digits.
-fn uuid_tail(id: uuid::Uuid) -> String {
-    let text = id.to_string();
-    match text.rsplit_once('-') {
-        Some((_, tail)) => tail.to_string(),
-        None => text,
-    }
 }
 
 fn base_name(uri: &str) -> &str {
@@ -380,7 +441,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use crate::model::{DigestRow, EntityRow, LinkRow, LocationRow, NodeType};
+    use crate::model::{DigestRow, EntityRow, LinkRow, LocationRow, NodeType, ParentRef};
     use uuid::Uuid;
 
     fn sample() -> FileRow {
@@ -422,43 +483,143 @@ mod tests {
         }
     }
 
-    #[test]
-    fn entity_table_omits_the_name_column() {
-        let row = EntityRow {
-            node_type: NodeType::Program,
-            id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
-            path: Some("/CLL".into()),
-            name: Some("CLL".into()),
-            metadata: BTreeMap::from([("site".into(), "OHSU".into())]),
+    fn entities() -> Vec<EntityRow> {
+        let program = Uuid::parse_str("01a17f62-d423-74d7-ae78-c9620b896c52").unwrap();
+        let project = Uuid::parse_str("01a17f62-d42b-736f-ae7f-87231f3eb357").unwrap();
+        let case = Uuid::parse_str("01a17f62-d434-702a-b03b-95cf52f8ee52").unwrap();
+        let sample = Uuid::parse_str("01a17f62-d442-71f8-a6cf-bf9cceb2a884").unwrap();
+        let row = |node_type, id, path: Option<&str>, parent: Option<ParentRef>| EntityRow {
+            node_type,
+            id,
+            path: path.map(String::from),
+            name: None,
+            parent,
+            project: None,
+            metadata: BTreeMap::new(),
         };
-        let table = render_entities(&[row.clone()], RenderFormat::Table);
+        let mut rows = vec![
+            row(NodeType::Program, program, Some("/CLL"), None),
+            row(
+                NodeType::Project,
+                project,
+                Some("/CLL/WES"),
+                Some(ParentRef {
+                    node_type: NodeType::Program,
+                    id: program,
+                    path: Some("/CLL".into()),
+                }),
+            ),
+            row(
+                NodeType::Case,
+                case,
+                None,
+                Some(ParentRef {
+                    node_type: NodeType::Project,
+                    id: project,
+                    path: Some("/CLL/WES".into()),
+                }),
+            ),
+            row(
+                NodeType::Sample,
+                sample,
+                None,
+                Some(ParentRef {
+                    node_type: NodeType::Case,
+                    id: case,
+                    path: None,
+                }),
+            ),
+        ];
+        rows[2].project = Some("/CLL/WES".into());
+        rows[3].project = Some("/CLL/WES".into());
+        rows[2]
+            .metadata
+            .insert("subject_id".into(), "CLL-001".into());
+        rows[3]
+            .metadata
+            .insert("sample_kind".into(), "tumor".into());
+        rows
+    }
+
+    #[test]
+    fn compact_entity_table_shows_short_ids_and_where_each_entity_sits() {
+        let rendered = render_entities(
+            &entities(),
+            RenderFormat::Table,
+            Layout::Compact,
+            &HashSet::new(),
+        );
         assert_eq!(
-            table
-                .lines()
+            rendered,
+            "\
+id            type     path          parent             metadata
+c9620b896c52  program  /CLL                             
+87231f3eb357  project  /CLL/WES      /CLL               
+95cf52f8ee52  case     /CLL/WES/...  /CLL/WES           subject_id=CLL-001
+bf9cceb2a884  sample   /CLL/WES/...  case 95cf52f8ee52  sample_kind=tumor
+"
+        );
+    }
+
+    #[test]
+    fn a_shared_short_id_is_shown_in_full() {
+        let rows = entities();
+        let case = rows[2].id;
+        let rendered = render_entities(
+            &rows,
+            RenderFormat::Table,
+            Layout::Compact,
+            &HashSet::from([case]),
+        );
+        assert!(rendered.contains(&format!("{case}  case")), "{rendered}");
+        assert!(rendered.contains(&format!("case {case}")), "{rendered}");
+    }
+
+    #[test]
+    fn full_entity_table_csv_and_json_keep_full_ids() {
+        let rows = entities();
+        let sample = &rows[3];
+        let full = render_entities(&rows, RenderFormat::Table, Layout::Full, &HashSet::new());
+        assert_eq!(
+            full.lines()
                 .next()
                 .unwrap()
                 .split_whitespace()
                 .collect::<Vec<_>>(),
-            ["node_type", "id", "path", "metadata"]
+            ["node_type", "id", "path", "project", "parent", "metadata"]
         );
-        assert!(table.contains("/CLL"));
-        assert!(table.contains("site=OHSU"));
+        let last = full.lines().last().unwrap();
+        assert!(last.contains(&sample.id.to_string()), "{last}");
+        assert!(last.contains(&format!("case {}", rows[2].id)), "{last}");
 
-        let csv = render_entities(&[row.clone()], RenderFormat::Csv);
-        assert!(csv.starts_with("node_type,id,path,metadata\n"));
-        assert!(csv.contains("/CLL"));
-        assert!(csv.contains("site=OHSU"));
+        let csv = render_entities(&rows, RenderFormat::Csv, Layout::Compact, &HashSet::new());
+        assert!(csv.starts_with("node_type,id,path,project,parent,metadata\n"));
+        assert!(csv.contains(&sample.id.to_string()));
 
-        let json: serde_json::Value =
-            serde_json::from_str(&render_entities(&[row], RenderFormat::Json)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&render_entities(
+            &rows,
+            RenderFormat::Json,
+            Layout::Compact,
+            &HashSet::new(),
+        ))
+        .unwrap();
         assert!(json[0].get("name").is_none());
         assert_eq!(json[0]["path"], "/CLL");
-        assert_eq!(json[0]["metadata"]["site"], "OHSU");
+        assert_eq!(json[3]["path"], serde_json::Value::Null);
+        assert_eq!(json[3]["project"], "/CLL/WES");
+        assert_eq!(json[3]["parent"]["node_type"], "case");
+        assert_eq!(json[3]["parent"]["id"], rows[2].id.to_string());
+        assert_eq!(json[3]["metadata"]["sample_kind"], "tumor");
     }
 
     #[test]
     fn compact_table_shortens_id_size_digest_name_and_links() {
-        let rendered = render_files(&[sample()], RenderFormat::Table, FileLayout::Compact);
+        let rendered = render_files(
+            &[sample()],
+            RenderFormat::Table,
+            Layout::Compact,
+            &HashSet::new(),
+        );
         assert_eq!(
             rendered,
             "\
@@ -471,7 +632,12 @@ id            size   digest               drift  name         links
     #[test]
     fn full_table_keeps_the_wide_columns() {
         let row = sample();
-        let rendered = render_files(&[row.clone()], RenderFormat::Table, FileLayout::Full);
+        let rendered = render_files(
+            &[row.clone()],
+            RenderFormat::Table,
+            Layout::Full,
+            &HashSet::new(),
+        );
         let line = rendered.lines().nth(1).unwrap();
         assert!(line.contains(&row.id.to_string()));
         assert!(line.contains(" 1536 "));
@@ -492,13 +658,23 @@ id            size   digest               drift  name         links
     #[test]
     fn csv_and_json_stay_full_when_the_table_is_compact() {
         let row = sample();
-        let csv = render_files(&[row.clone()], RenderFormat::Csv, FileLayout::Compact);
+        let csv = render_files(
+            &[row.clone()],
+            RenderFormat::Csv,
+            Layout::Compact,
+            &HashSet::new(),
+        );
         assert!(csv.starts_with("id,size,digest,drift,locations,links\n"));
         assert!(csv.contains(&row.id.to_string()));
         assert!(csv.contains("/data/run/a.fq"));
         assert!(csv.contains("1536"));
 
-        let json = render_files(&[row.clone()], RenderFormat::Json, FileLayout::Compact);
+        let json = render_files(
+            &[row.clone()],
+            RenderFormat::Json,
+            Layout::Compact,
+            &HashSet::new(),
+        );
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed[0]["id"], row.id.to_string());
         assert_eq!(parsed[0]["size"], 1536);
@@ -539,7 +715,12 @@ id            size   digest               drift  name         links
         row.digests[0].hex = "abcd".into();
         row.locations.truncate(1);
         row.links.clear();
-        let rendered = render_files(&[row], RenderFormat::Table, FileLayout::Compact);
+        let rendered = render_files(
+            &[row],
+            RenderFormat::Table,
+            Layout::Compact,
+            &HashSet::new(),
+        );
         let line = rendered.lines().nth(1).unwrap();
         assert!(line.contains("blake3:abcd"));
         assert!(line.contains("a.fq"));
@@ -550,7 +731,7 @@ id            size   digest               drift  name         links
     fn a_negative_size_is_printed_as_the_integer() {
         let mut row = sample();
         row.size = Some(-3);
-        let cells = compact_cells(&row);
+        let cells = compact_cells(&row, &HashSet::new());
         assert_eq!(cells[1], "-3");
     }
 }

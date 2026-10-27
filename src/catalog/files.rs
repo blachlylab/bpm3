@@ -1104,19 +1104,10 @@ fn insert_errors(conn: &Connection, run: &Run, errors: &[(String, String)]) -> R
 
 fn resolve_file(conn: &Connection, file: &FileRef) -> Result<String, Error> {
     match file {
-        FileRef::Id(id) => {
-            let id = id.to_string();
-            let exists: bool = conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM files WHERE id = ?)",
-                [&id],
-                |row| row.get(0),
-            )?;
-            if exists {
-                Ok(id)
-            } else {
-                Err(Error::FileNotFound(id))
-            }
-        }
+        FileRef::Id(input) => match super::resolve_id(conn, super::IdSpace::Files, input)? {
+            Some(id) => Ok(id.to_string()),
+            None => Err(Error::FileNotFound(input.to_string())),
+        },
         FileRef::Location { backend, uri } => conn
             .query_row(
                 "SELECT file_id FROM file_locations WHERE backend = ? AND uri = ?",

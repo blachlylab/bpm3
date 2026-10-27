@@ -826,7 +826,9 @@ fn a_new_file_already_committed_by_another_track_becomes_a_location() {
         missing: Vec::new(),
     };
     assert!(catalog.acknowledge(&empty).is_err());
-    let file = catalog.file(&FileRef::Id(id.parse().unwrap())).unwrap();
+    let file = catalog
+        .file(&FileRef::Id(uuid::Uuid::parse_str(&id).unwrap().into()))
+        .unwrap();
     assert_eq!(file.locations.len(), 2);
     drop(catalog);
     assert_eq!(env.count("files"), 1);
@@ -1658,7 +1660,18 @@ fn a_run_whose_process_died_is_marked_incomplete() {
     assert!(leftovers.is_empty());
 }
 
-/// Take a fresh catalog back to version 4 by removing what V005 added.
+/// Take a fresh catalog back to version 5 by removing what V006 added.
+const BACK_TO_V5: &str = "DROP INDEX files_short_id;
+     DROP INDEX programs_short_id;
+     DROP INDEX projects_short_id;
+     DROP INDEX cases_short_id;
+     DROP INDEX samples_short_id;
+     DROP INDEX raw_data_short_id;
+     DROP INDEX analyses_short_id;
+     DROP INDEX link_runs_short_id;
+     UPDATE catalog_meta SET value = '5' WHERE key = 'schema_version';";
+
+/// Take a version 5 catalog back to version 4 by removing what V005 added.
 const BACK_TO_V4: &str = "DROP TABLE untrack_runs;
      UPDATE catalog_meta SET value = '4' WHERE key = 'schema_version';";
 
@@ -1692,6 +1705,7 @@ fn a_version_3_catalog_keeps_its_ingest_runs_as_track_runs() {
     env.track(&env.data());
     {
         let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V5).unwrap();
         conn.execute_batch(BACK_TO_V4).unwrap();
         conn.execute_batch(BACK_TO_V3).unwrap();
     }
@@ -1701,7 +1715,7 @@ fn a_version_3_catalog_keeps_its_ingest_runs_as_track_runs() {
     env.track(&env.data());
     assert_eq!(
         env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
-        "5"
+        "6"
     );
     assert_eq!(
         env.scalar("SELECT group_concat(files_created, ' ') FROM (SELECT files_created FROM track_runs ORDER BY started_at)"),
@@ -1714,6 +1728,7 @@ fn a_version_1_catalog_migrates_to_the_file_indexes() {
     let env = Env::new("v1");
     {
         let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V5).unwrap();
         conn.execute_batch(BACK_TO_V4).unwrap();
         conn.execute_batch(BACK_TO_V3).unwrap();
         conn.execute_batch(BACK_TO_V2).unwrap();
@@ -1731,7 +1746,7 @@ fn a_version_1_catalog_migrates_to_the_file_indexes() {
     env.track(&env.data());
     assert_eq!(
         env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
-        "5"
+        "6"
     );
     assert_eq!(
         env.scalar(
@@ -1751,6 +1766,7 @@ fn a_version_2_catalog_keeps_its_links_and_their_roles_become_known() {
     let id = env.id_at(&env.data().join("a.fq"));
     {
         let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V5).unwrap();
         conn.execute_batch(BACK_TO_V4).unwrap();
         conn.execute_batch(BACK_TO_V3).unwrap();
         conn.execute_batch(BACK_TO_V2).unwrap();
@@ -1769,7 +1785,7 @@ fn a_version_2_catalog_keeps_its_links_and_their_roles_become_known() {
     env.track(&env.data());
     assert_eq!(
         env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
-        "5"
+        "6"
     );
     assert_eq!(
         env.scalar("SELECT COUNT(*) FROM file_links WHERE run_id IS NULL AND role = 'control'"),

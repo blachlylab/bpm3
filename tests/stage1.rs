@@ -75,6 +75,11 @@ fn fail(run: Run) -> Run {
     run
 }
 
+/// The short id the default tables show: the UUID's last twelve digits.
+fn short(id: &str) -> &str {
+    &id[id.len() - 12..]
+}
+
 fn line(out: &str) -> String {
     out.lines()
         .map(str::trim)
@@ -181,7 +186,7 @@ fn scenario_01_init_modes_and_force() {
         &default,
         "SELECT value FROM catalog_meta WHERE key = 'schema_version'",
     ));
-    assert_eq!(version, "5");
+    assert_eq!(version, "6");
 
     ok(bpm(home, home, &["init", "--force"]));
     let id_after = line(&sql(
@@ -412,8 +417,8 @@ fn scenario_03_chain_and_metadata_path() {
 
     let listed = ok(bpm(home, home, &["--catalog", cat, "query", "entities"]));
     assert!(listed.out.contains("/CLL/WES-relapse"), "{}", listed.out);
-    assert!(listed.out.contains(&case_id));
-    assert!(listed.out.contains(&analysis_id));
+    assert!(listed.out.contains(short(&case_id)));
+    assert!(listed.out.contains(short(&analysis_id)));
 }
 
 #[test]
@@ -696,7 +701,11 @@ fn scenario_06_rename_and_reparent() {
             "/CLL2/Other",
         ],
     ));
-    assert!(under_other.out.contains(&case_id), "{}", under_other.out);
+    assert!(
+        under_other.out.contains(short(&case_id)),
+        "{}",
+        under_other.out
+    );
     let under_wes = ok(bpm(
         home,
         home,
@@ -709,7 +718,11 @@ fn scenario_06_rename_and_reparent() {
             "/CLL2/WES-relapse",
         ],
     ));
-    assert!(!under_wes.out.contains(&case_id), "{}", under_wes.out);
+    assert!(
+        !under_wes.out.contains(short(&case_id)),
+        "{}",
+        under_wes.out
+    );
 
     let onto_sample = fail(bpm(
         home,
@@ -733,7 +746,11 @@ fn scenario_06_rename_and_reparent() {
             "/CLL2/Other",
         ],
     ));
-    assert!(still_there.out.contains(&case_id), "{}", still_there.out);
+    assert!(
+        still_there.out.contains(short(&case_id)),
+        "{}",
+        still_there.out
+    );
 }
 
 #[test]
@@ -852,13 +869,13 @@ fn scenario_07_metadata_selectors() {
             "subject_id:",
         ],
     ));
-    assert!(by_key.out.contains(&case_id), "{}", by_key.out);
+    assert!(by_key.out.contains(short(&case_id)), "{}", by_key.out);
     let by_value = ok(bpm(
         home,
         home,
         &["--catalog", cat, "query", "entities", "--where", ":CLL-001"],
     ));
-    assert!(by_value.out.contains(&case_id), "{}", by_value.out);
+    assert!(by_value.out.contains(short(&case_id)), "{}", by_value.out);
 
     let json = ok(bpm(
         home,
@@ -963,7 +980,7 @@ fn scenario_07_metadata_selectors() {
         ],
     ));
     assert!(
-        both.out.contains(&case_id) && both.out.contains(&other),
+        both.out.contains(short(&case_id)) && both.out.contains(short(&other)),
         "{}",
         both.out
     );
@@ -1103,7 +1120,7 @@ fn scenario_08_and_25_conventional_keys_are_data() {
             home,
             &["--catalog", cat, "query", "entities", "--where", selector],
         ));
-        assert!(found.out.contains(id), "{selector}\n{}", found.out);
+        assert!(found.out.contains(short(id)), "{selector}\n{}", found.out);
     }
     let all = ok(bpm(home, home, &["--catalog", cat, "query", "entities"]));
     assert!(all.out.contains("embargo_until=2099-01-01"), "{}", all.out);
@@ -1172,12 +1189,12 @@ fn scenario_09_metadata_is_not_copied_onto_children() {
     let case_line = under
         .out
         .lines()
-        .find(|line| line.contains(&case_id))
+        .find(|line| line.starts_with(short(&case_id)))
         .expect(&under.out);
     let sample_line = under
         .out
         .lines()
-        .find(|line| line.contains(&sample_id))
+        .find(|line| line.starts_with(short(&sample_id)))
         .expect(&under.out);
     assert!(case_line.contains("consent=GRU"), "{case_line}");
     assert!(!sample_line.contains("consent"), "{sample_line}");
@@ -1382,7 +1399,7 @@ fn schema_newer_is_refused_and_a_missing_version_is_corrupt() {
     std::thread::sleep(Duration::from_millis(20));
     let refused = fail(bpm(home, home, &["--catalog", cat, "query", "entities"]));
     assert!(
-        refused.err.contains("99") && refused.err.contains("(version 5)"),
+        refused.err.contains("99") && refused.err.contains("(version 6)"),
         "{}",
         refused.err
     );

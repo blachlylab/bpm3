@@ -11,12 +11,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use super::{
-    Catalog, Index, begin, delete_ids, insert_node, load_index, resolve_all, selector_matches,
-    table_name, timestamp,
+    Catalog, IdSpace, Index, begin, delete_ids, insert_node, load_index, resolve_all, resolve_id,
+    selector_matches, table_name, timestamp,
 };
 use crate::error::Error;
 use crate::link::{Expect, Mode, Rendered, RenderedStep, Source, validate_role};
-use crate::model::{FileRef, NodeType, Selector};
+use crate::model::{FileRef, NodeType, Selector, parse_id};
 
 #[derive(Debug, Clone, Default)]
 pub struct LinkOptions {
@@ -184,17 +184,12 @@ impl Catalog {
         let mut missing = Vec::new();
         for operand in operands {
             match operand {
-                FileRef::Id(id) => {
-                    let id = id.to_string();
-                    let exists: bool = snapshot.query_row(
-                        "SELECT EXISTS (SELECT 1 FROM files WHERE id = ?)",
-                        [&id],
-                        |row| row.get(0),
-                    )?;
-                    if !exists {
-                        missing.push(id);
+                FileRef::Id(input) => {
+                    let Some(id) = resolve_id(&snapshot, IdSpace::Files, input)? else {
+                        missing.push(input.to_string());
                         continue;
-                    }
+                    };
+                    let id = id.to_string();
                     let mut stmt = snapshot.prepare_cached(
                         "SELECT uri FROM file_locations WHERE file_id = ? ORDER BY backend, uri",
                     )?;
@@ -891,15 +886,18 @@ const NODE_TYPES_WITH_RUNS: [NodeType; 4] = [
 ];
 
 fn plan_undo(conn: &Connection, index: &Index, run: &str) -> Result<UndoPlan, Error> {
+    let none = || Error::Message(format!("no link run {run}; `bpm undo --list` shows them"));
+    let input = parse_id(run).ok_or_else(none)?;
+    let id = resolve_id(conn, IdSpace::LinkRuns, &input)?.ok_or_else(none)?;
     let row = conn
         .query_row(
             "SELECT id, command, applied_at, entities_created, links_created, roles_changed, undone_at
              FROM link_runs WHERE id = ?",
-            [run],
+            [id.to_string()],
             run_row,
         )
         .optional()?
-        .ok_or_else(|| Error::Message(format!("no link run {run}; `bpm undo --list` shows them")))?;
+        .ok_or_else(none)?;
     if let Some(when) = &row.undone_at {
         return Err(Error::Message(format!(
             "link run {run} was undone at {when}"

@@ -75,6 +75,9 @@ pub enum Error {
     #[error("no file matches {0}")]
     FileNotFound(String),
 
+    #[error("short id {short} matches {} ids: {}; use the full id", .ids.len(), .ids.join(", "))]
+    AmbiguousShortId { short: String, ids: Vec<String> },
+
     #[error("file is not linked to {0}")]
     NotLinked(String),
 
