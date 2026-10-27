@@ -101,6 +101,10 @@ enum Command {
         /// Also compute and store MD5.
         #[arg(long)]
         md5: bool,
+        /// How many local files to read at once. Use 1 for a single spinning
+        /// disk, where parallel reads make the head seek between files.
+        #[arg(short, long, default_value_t = track::WORKERS, value_parser = jobs)]
+        jobs: usize,
         #[command(flatten)]
         filters: FilterArgs,
     },
@@ -536,6 +540,7 @@ fn dispatch() -> Result<(), Error> {
         Command::Scan {
             target,
             md5,
+            jobs,
             filters,
         } => {
             let filter = filters.build()?;
@@ -545,6 +550,7 @@ fn dispatch() -> Result<(), Error> {
                 &ScanArg::parse(target.as_deref()),
                 &filter,
                 md5,
+                jobs,
             )?;
             for (uri, message) in &report.errors {
                 eprintln!("bpm: {uri}: {message}");
@@ -1238,6 +1244,14 @@ fn link_operand(raw: &str) -> Result<FileRef, Error> {
         };
     }
     track::file_ref(raw)
+}
+
+/// `--jobs`: a whole number from 1 to 64.
+fn jobs(raw: &str) -> Result<usize, String> {
+    match raw.parse::<usize>() {
+        Ok(jobs @ 1..=64) => Ok(jobs),
+        _ => Err("expected a whole number from 1 to 64".into()),
+    }
 }
 
 /// Ask on a terminal. Without one, a run that needs an answer fails.

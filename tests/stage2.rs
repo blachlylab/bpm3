@@ -495,7 +495,16 @@ fn scan_logs_its_total_and_counts_against_it() {
     }
     write(&many.join("skip.txt"), b"no");
     ok(env.track(&many));
-    let run = ok(env.bpm(&["scan", many.to_str().unwrap(), "--whitelist", "*.png"]));
+    // One read at a time, so the byte count moves in step with the
+    // locations; in parallel, reads still in flight add to it.
+    let run = ok(env.bpm(&[
+        "scan",
+        many.to_str().unwrap(),
+        "--whitelist",
+        "*.png",
+        "-j",
+        "1",
+    ]));
     assert!(run.err.contains("bpm: scan /"), "{}", run.err);
     assert!(run.err.contains("bpm: whitelist *.png"), "{}", run.err);
     // The total is known before any location is read, after the filters.
@@ -525,6 +534,64 @@ fn scan_logs_its_total_and_counts_against_it() {
     );
     assert!(!run.err.contains('\u{1b}'), "{}", run.err);
     assert!(run.out.contains("101 locations, 101 ok"), "{}", run.out);
+
+    // The default reads in parallel and ends on the same totals.
+    let parallel = ok(env.bpm(&["scan", many.to_str().unwrap(), "--whitelist", "*.png"]));
+    assert!(
+        parallel
+            .err
+            .contains("bpm: 101/101 locations, 909 B of 909 B read"),
+        "{}",
+        parallel.err
+    );
+    assert!(
+        parallel.out.contains("101 locations, 101 ok"),
+        "{}",
+        parallel.out
+    );
+}
+
+#[test]
+fn a_parallel_scan_records_what_a_serial_scan_records() {
+    // Two catalogs over the same files: one scanned a file at a time, one in
+    // parallel. Every drift state, stat, and digest must come out the same.
+    let serial = Env::new("scan-serial");
+    let parallel = Env::new("scan-parallel");
+    for env in [&serial, &parallel] {
+        let dir = env.data().join("run");
+        for index in 0..300 {
+            write(
+                &dir.join(format!("f{index:03}.fq")),
+                format!("reads {}\n", index % 7)
+                    .repeat(index + 1)
+                    .as_bytes(),
+            );
+        }
+        ok(env.track(&dir));
+        // Drift for the scan to find: a change, a removal, and a copy.
+        write(&dir.join("f010.fq"), b"changed\n");
+        fs::remove_file(dir.join("f020.fq")).unwrap();
+        fs::copy(dir.join("f030.fq"), dir.join("f031.fq")).unwrap();
+    }
+    ok(serial.bpm(&["scan", "-j", "1", serial.data().to_str().unwrap()]));
+    ok(parallel.bpm(&["scan", "-j", "16", parallel.data().to_str().unwrap()]));
+    let state = |env: &Env| {
+        let root = env.data().to_str().unwrap().to_string();
+        env.sql(&format!(
+            "SELECT replace(l.uri, '{root}', '') AS uri, l.presence, l.stat_state, l.digest_state,
+                    l.last_size, f.fingerprint, d.digest
+             FROM file_locations l JOIN files f ON f.id = l.file_id
+             LEFT JOIN file_digests d ON d.file_id = l.file_id AND d.current = 1
+             ORDER BY l.uri"
+        ))
+    };
+    let (a, b) = (state(&serial), state(&parallel));
+    assert_eq!(a.lines().count(), 301, "{a}");
+    assert_eq!(a, b);
+    assert!(a.contains("missing") && a.contains("changed"), "{a}");
+
+    let refused = fail(serial.bpm(&["scan", "-j", "0"]));
+    assert!(refused.err.contains("1 to 64"), "{}", refused.err);
 }
 
 #[test]

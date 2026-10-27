@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -30,9 +31,10 @@ use walk::{WalkItem, Walker};
 /// Files per committed batch. Internal; a crash keeps every committed batch.
 pub const BATCH: usize = 1000;
 
-/// Threads that stat and fingerprint one track batch. On a network
-/// filesystem each read waits on a round trip, so several in flight help.
-const WORKERS: usize = 8;
+/// Threads that stat and fingerprint one track batch, and the default for
+/// how many locations a scan reads at once. On a network filesystem each read
+/// waits on a round trip, so several in flight help.
+pub const WORKERS: usize = 8;
 
 /// How often the stderr count moves. A terminal rewrites one line; a pipe
 /// gets a new line, because a carriage return would not erase the last one.
@@ -225,7 +227,7 @@ fn track_batch(
         };
         probes.push(probe);
     }
-    let mut reads = parallel_map(&probes, |probe| match probe {
+    let mut reads = parallel_map(&probes, WORKERS, |probe| match probe {
         Probe::Fresh(path, _) => Some(match fs::metadata(path) {
             Ok(meta) if meta.is_file() => {
                 let print = hash::fingerprint(path);
@@ -301,11 +303,15 @@ fn track_batch(
     Ok(())
 }
 
-/// `each` over `items` on up to [`WORKERS`] threads, results in input order.
-fn parallel_map<T: Sync, R: Send>(items: &[T], each: impl Fn(&T) -> R + Sync) -> Vec<R> {
+/// `each` over `items` on up to `workers` threads, results in input order.
+fn parallel_map<T: Sync, R: Send>(
+    items: &[T],
+    workers: usize,
+    each: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
     let next = AtomicUsize::new(0);
     let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..WORKERS.min(items.len()))
+        let workers: Vec<_> = (0..workers.max(1).min(items.len()))
             .map(|_| {
                 scope.spawn(|| {
                     let mut mine = Vec::new();
@@ -321,7 +327,7 @@ fn parallel_map<T: Sync, R: Send>(items: &[T], each: impl Fn(&T) -> R + Sync) ->
             .collect();
         workers
             .into_iter()
-            .flat_map(|worker| worker.join().expect("a track worker panicked"))
+            .flat_map(|worker| worker.join().expect("a worker thread panicked"))
             .collect()
     });
     done.sort_unstable_by_key(|(index, _)| *index);
@@ -652,11 +658,14 @@ fn hash_candidate(candidate: &Candidate) -> Option<(String, String)> {
     })
 }
 
+/// Check the selected locations. Up to `jobs` local locations are read at
+/// once; one reads them in path order, as a single spinning disk prefers.
 pub fn scan(
     catalog: &mut Catalog,
     arg: &ScanArg,
     filter: &PathFilter,
     md5: bool,
+    jobs: usize,
 ) -> Result<ScanReport, Error> {
     let scope = match arg {
         ScanArg::All => ScanScope::default(),
@@ -699,6 +708,7 @@ pub fn scan(
         &scope,
         filter,
         md5,
+        jobs,
         &mut report,
         &mut progress,
     );
@@ -708,12 +718,14 @@ pub fn scan(
     result.map(|()| report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_pages(
     catalog: &mut Catalog,
     run: &Run,
     scope: &ScanScope,
     filter: &PathFilter,
     md5: bool,
+    jobs: usize,
     report: &mut ScanReport,
     progress: &mut ScanProgress,
 ) -> Result<(), Error> {
@@ -724,7 +736,7 @@ fn scan_pages(
             return Ok(());
         };
         after = Some((last.backend.clone(), last.uri.clone()));
-        let mut results = Vec::with_capacity(page.len());
+        let mut local = Vec::with_capacity(page.len());
         for target in page {
             if !in_filter(scope, filter, &target.uri) {
                 continue;
@@ -735,10 +747,17 @@ fn scan_pages(
                 progress.location();
                 continue;
             }
-            let outcome = observe(&target, md5, progress);
-            progress.location();
-            results.push((target, outcome));
+            local.push(target);
         }
+        // The reads run in parallel; the results come back in path order, so
+        // the batch is applied exactly as a one-at-a-time scan would apply it.
+        let shared = Mutex::new(&mut *progress);
+        let outcomes = parallel_map(&local, jobs, |target| {
+            let outcome = observe(target, md5, &shared);
+            lock(&shared).location();
+            outcome
+        });
+        let results: Vec<(ScanTarget, ScanOutcome)> = local.into_iter().zip(outcomes).collect();
         let states = catalog.apply_scan(run, &results)?;
         for ((target, outcome), drift) in results.iter().zip(states) {
             if let ScanOutcome::Error(message) = outcome {
@@ -786,8 +805,18 @@ fn scan_totals(
     Ok(progress)
 }
 
+/// The progress line, shared by the threads of one scan page. A thread that
+/// panicked while drawing it leaves it usable.
+fn lock<'a, 'b>(
+    progress: &'a Mutex<&'b mut ScanProgress>,
+) -> std::sync::MutexGuard<'a, &'b mut ScanProgress> {
+    progress
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Stat a location and, when it is there, read it once.
-fn observe(target: &ScanTarget, md5: bool, progress: &mut ScanProgress) -> ScanOutcome {
+fn observe(target: &ScanTarget, md5: bool, progress: &Mutex<&mut ScanProgress>) -> ScanOutcome {
     let meta = match fs::metadata(&target.uri) {
         Ok(meta) => meta,
         Err(err) if is_gone(&err) => return ScanOutcome::Missing,
@@ -804,7 +833,7 @@ fn observe(target: &ScanTarget, md5: bool, progress: &mut ScanProgress) -> ScanO
     let want_fingerprint =
         stat_changed || target.fingerprint_scheme.as_deref() != Some(hash::HEAD_SCHEME);
     let read = hash::digest_reporting(Path::new(&target.uri), md5, want_fingerprint, |bytes| {
-        progress.read(bytes)
+        lock(progress).read(bytes)
     });
     match read {
         Ok(digests) => ScanOutcome::Present {

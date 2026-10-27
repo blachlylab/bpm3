@@ -349,7 +349,7 @@ Core stores `consent`, `embargo_until`, and any other policy note the operator w
 
 ### 4.13 Command vocabulary
 
-Rows with an empty Unstable cell are the Core command contract. A `*` means the command is under consideration and is not finalized, in this section or in the section cited. Flag spelling for an unmarked command is fixed when that command is implemented. `bpm scan --md5` requests an MD5 digest as a second pass. The download flag for object stores is deferred until that stage. Other scan flags are still TBD and are not part of the contract yet. `bpm link` takes a target template, a role, and files; its flags are in the [link guide](../guide/link.md). It does not take a primary flag. That idea is undefined until we give it behavior.
+Rows with an empty Unstable cell are the Core command contract. A `*` means the command is under consideration and is not finalized, in this section or in the section cited. Flag spelling for an unmarked command is fixed when that command is implemented. `bpm scan --md5` requests an MD5 digest as a second pass. `bpm scan --jobs N` reads up to N local files at once, 8 by default; `-j 1` suits a single spinning disk. The download flag for object stores is deferred until that stage. Other scan flags are still TBD and are not part of the contract yet. `bpm link` takes a target template, a role, and files; its flags are in the [link guide](../guide/link.md). It does not take a primary flag. That idea is undefined until we give it behavior.
 
 The token typed into `bpm serve` is not `bpm login`. `bpm login` is the future client for a Govern server.
 
