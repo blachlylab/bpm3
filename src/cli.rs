@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::catalog::{self, AckOutcome, Catalog, EntityQuery, FileQuery, LinkOptions, SqlOutcome};
 use crate::error::Error;
 use crate::link::{Expect, MatchOn, Renderer, Table, Template};
-use crate::model::{Drift, FileRef, NodeType, POSIX};
+use crate::model::{Drift, FileRef, NodeType};
 use crate::perms;
 use crate::query::{self, RenderFormat};
 use crate::track::filter::{self, FilterSpec, PathFilter};
@@ -57,20 +57,12 @@ enum Command {
     Rename { target: String, new_name: String },
     /// Move an entity under a new legal parent.
     Reparent { target: String, new_parent: String },
-    /// Delete an entity, a location, or a file row. Never deletes bytes.
-    /// Refuses an entity with children or linked files, and a linked file.
+    /// Delete an entity. Refuses an entity with children or linked files.
+    /// Files leave the catalog with untrack.
     Delete {
         /// Entity path or UUID.
-        #[arg(required_unless_present_any = ["location", "file"], conflicts_with_all = ["location", "file"])]
-        target: Option<String>,
-        /// Remove this location from its file. The file and its other locations stay.
-        #[arg(long, conflicts_with = "file")]
-        location: Option<String>,
-        /// Remove this file row (id or location path) with its locations and digests.
-        #[arg(long)]
-        file: Option<String>,
-        /// Also delete descendant entities, their metadata, and their file links;
-        /// or, with --file, that file's links.
+        target: String,
+        /// Also delete descendant entities, their metadata, and their file links.
         #[arg(long)]
         cascade: bool,
     },
@@ -79,6 +71,24 @@ enum Command {
         path: PathBuf,
         #[command(flatten)]
         filters: FilterArgs,
+    },
+    /// Remove catalog locations at or under paths, and a file row when its
+    /// last location goes. Never deletes bytes. The guide is docs/guide/untrack.md.
+    Untrack {
+        /// Locations, or directories that reach every location below them.
+        /// A path need not exist on disk.
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        #[command(flatten)]
+        filters: FilterArgs,
+        /// Also remove the links of linked files that lose their last location.
+        #[arg(long)]
+        cascade: bool,
+        #[command(flatten)]
+        show: ShowArgs,
+        /// Remove file rows without asking.
+        #[arg(short, long)]
+        yes: bool,
     },
     /// Check locations already in the catalog for drift and store digests.
     /// No argument scans every location; a backend or a path narrows that.
@@ -465,20 +475,19 @@ fn dispatch() -> Result<(), Error> {
             let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
             catalog.reparent(&target, &new_parent)?;
         }
-        Command::Delete {
-            target,
-            location,
-            file,
-            cascade,
-        } => {
+        Command::Delete { target, cascade } => {
             let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
-            if let Some(location) = location {
-                catalog.delete_location(POSIX, &track::location_uri(&location)?)?;
-            } else if let Some(file) = file {
-                catalog.delete_file(&track::file_ref(&file)?, cascade)?;
-            } else if let Some(target) = target {
-                catalog.delete(&target, cascade)?;
-            }
+            catalog.delete(&target, cascade)?;
+        }
+        Command::Untrack {
+            paths,
+            filters,
+            cascade,
+            show,
+            yes,
+        } => {
+            let filter = filters.build()?;
+            run_untrack(cli.catalog.as_deref(), &paths, &filter, cascade, &show, yes)?;
         }
         Command::Track { path, filters } => {
             let filter = filters.build()?;
@@ -1051,6 +1060,95 @@ fn run_links(
         ),
         None if options.unlink => println!("unlinked {}", plan.count("unlink")),
         None => println!("nothing to write"),
+    }
+    Ok(())
+}
+
+fn run_untrack(
+    flag: Option<&Path>,
+    paths: &[PathBuf],
+    filter: &PathFilter,
+    cascade: bool,
+    show: &ShowArgs,
+    yes: bool,
+) -> Result<(), Error> {
+    let mut operands = Vec::with_capacity(paths.len());
+    for path in paths {
+        operands.push(track::location_uri(path)?);
+    }
+    let keep = |_uri: &str, relpath: &str| filter.allows(relpath);
+    // A writer, because untrack writes; planning still reads a snapshot.
+    let mut catalog = open_write_unchecked(flag)?;
+    let plan = catalog.plan_untrack(&operands, &keep)?;
+    println!(
+        "{} locations selected, {} excluded by filters",
+        plan.selected, plan.excluded
+    );
+    println!(
+        "remove {} locations from files with other copies, {} files ({} with metadata), {} links",
+        plan.locations.len(),
+        plan.files.len(),
+        plan.with_metadata(),
+        if cascade { plan.links() } else { 0 }
+    );
+    if show.detail {
+        for uri in &plan.locations {
+            println!("location\t{uri}");
+        }
+        for file in &plan.files {
+            for uri in &file.uris {
+                println!("file\t{}\t{uri}", file.id);
+            }
+            if cascade {
+                for link in &file.links {
+                    println!(
+                        "link\t{}\t{}\t{}\t{}",
+                        file.id, link.node_type, link.node_id, link.role
+                    );
+                }
+            }
+        }
+    }
+    if !cascade && plan.linked().next().is_some() {
+        let lines: Vec<String> = plan
+            .linked()
+            .flat_map(|file| {
+                let uri = file.uris.first().map(String::as_str).unwrap_or(&file.id);
+                file.links.iter().map(move |link| {
+                    format!(
+                        "linked\t{uri}\t{} {}\t{}",
+                        link.node_type, link.node_id, link.role
+                    )
+                })
+            })
+            .collect();
+        for line in lines.iter().take(LISTED) {
+            eprintln!("bpm: {line}");
+        }
+        if lines.len() > LISTED {
+            eprintln!("bpm: … and {} more", lines.len() - LISTED);
+        }
+        return Err(catalog::linked_error(&plan));
+    }
+    if show.dry_run {
+        return Ok(());
+    }
+    if !plan.files.is_empty() && !yes {
+        confirm(&format!(
+            "this untrack removes {} file rows with their digests, metadata, and links",
+            plan.files.len()
+        ))?;
+    }
+    let command = serde_json::to_string(&std::env::args().collect::<Vec<_>>())
+        .unwrap_or_else(|_| "[]".into());
+    match catalog.apply_untrack(&operands, &keep, &plan, cascade, &command)? {
+        Some(run) => println!(
+            "untrack {run}: {} locations removed from files with other copies, {} files removed, {} links removed",
+            plan.locations.len(),
+            plan.files.len(),
+            plan.links()
+        ),
+        None => println!("nothing to untrack"),
     }
     Ok(())
 }

@@ -66,7 +66,7 @@ The first code can live in one Cargo package. The boundary that matters is the m
 | `cli` | clap, the traits | axum, rusqlite (it sees the trait, not the engine) |
 | `web` | axum, askama, the traits, vendored assets | clap, rusqlite |
 
-`track` implements both `bpm track` and `bpm scan`, and v1 calls it from the CLI only. The read-only web UI does not track or scan. HTML handlers format the same query structs the CLI prints. They do not grow a second query language. `manifest` and `import` are PRD §4.9 and §4.10, which are unstable, so they are not modules in the settled layout.
+`track` implements `bpm track`, `bpm scan`, `bpm acknowledge`, and `bpm untrack`, and v1 calls it from the CLI only. The read-only web UI does not track or scan. HTML handlers format the same query structs the CLI prints. They do not grow a second query language. `manifest` and `import` are PRD §4.9 and §4.10, which are unstable, so they are not modules in the settled layout.
 
 The SQLite implementation is the only module that embeds SQL for catalog mutations. Query methods on the trait (`entities_under`, `files_under`, `summary`) are the unstable sketch in §7 and PRD §4.8. `impact` and `lineage` wait for PRD §4.7.
 
@@ -312,6 +312,10 @@ Track and scan are different commands, so their run logs are different tables wi
 
 A run left `running` by a crash is `incomplete` the next time a process opens the catalog and can take that run's liveness flock. The catalog lock is not the signal, because it is released between batches of a live run. Running the command again is the recovery. Individual file batches are already committed. Track does not mark missing paths. Scan does.
 
+### untrack_runs
+
+Schema version 5. One row per applied `bpm untrack`: id, the argument vector as JSON, `applied_at`, and counts of locations removed, files removed, and links removed. It is an audit record and has no foreign keys. Untrack cannot be undone, because the rows it deletes are gone.
+
 ### manifests
 
 **Unstable (PRD §4.10).** The table below is the sketch. It is not part of the settled schema.
@@ -400,7 +404,7 @@ Drift against a trusted checksum compares what the backend returns now with the 
 
 ### Path filters
 
-The blacklist and the whitelist apply to the track walk and to which existing locations a scan checks. They do not delete a catalog row that a later filter would have skipped.
+The blacklist and the whitelist apply to the track walk, to which existing locations a scan checks, and to which locations an untrack removes. Untrack matches them the way scan does. A filter never deletes a catalog row by itself: a row a later filter would have skipped stays until an untrack selects it.
 
 The built-in blacklist is the file names `.DS_Store` and `Thumbs.db`. It always applies, unless this run passes `--no-default-blacklist`.
 
@@ -471,6 +475,19 @@ Scan does not merge file ids. Merging a duplicate path onto an existing file id 
 2. If the present locations do not all have the same BLAKE3, refuse and list each location with its digest. Nothing is written. The operator restores or removes the wrong copy and runs acknowledge again.
 3. If the BLAKE3 matches the current one and every location is already `ok`, report that there is nothing to acknowledge and write nothing.
 4. Otherwise, in one write transaction: when the bytes are new, clear `current` on every digest of the file and insert the observed digests as generation `max(generation) + 1`. When they match the current BLAKE3, keep the generation and accept only the stat. Write the size, mtime, and fingerprint to `files`, and mark each present location `present`, `unchanged`, `match` with its new stat. A location found missing keeps `missing`, and after a new generation its `digest_state` returns to `unverified`, because those bytes were never compared with the new digest.
+
+### Untrack
+
+`bpm untrack PATH…` removes catalog rows and never touches the filesystem beyond resolving each operand with the same location-path rule as track. The [untrack guide](../guide/untrack.md) is the operator's reference.
+
+1. In a read snapshot, resolve each operand to the `posix` locations it reaches: itself if it is a location, otherwise every location below it at a component boundary. An operand that reaches nothing fails the command.
+2. Keep the locations the path filters admit, matched against the path relative to their operand. Count the rest.
+3. Group the kept locations by file. A file that has a location outside the selection loses only the selected ones. A file whose every location is selected is removed.
+4. If a file to be removed has links and `--cascade` was not passed, list those links and stop.
+5. Print the plan. With `-n`, stop. If the plan removes a file row, ask, or without a terminal require `--yes`.
+6. Take the write lock and repeat steps 1–3. If the plan differs from the one shown, roll back and say the catalog changed. Otherwise delete the selected locations. For each removed file, delete its links (under `--cascade`), metadata, digests, and file row. Write the `untrack_runs` row and commit.
+
+No lock is held while the operator answers. The comparison in step 6 covers every link and location the plan read, so a link committed after the plan was shown cannot be removed without being shown. Entities are never deleted. A `link_runs` row and its `link_role_changes` keep naming removed files, and undo of that run skips what is gone.
 
 ### Object storage later
 
@@ -571,7 +588,7 @@ Clap 4 derive parser. The binary name is `bpm`. The subcommands Core implements 
 
 Output goes to stdout. Diagnostics go to stderr. Exit status is `0` on success and non-zero on a rejected command. `bpm track` and `bpm scan` also exit non-zero when any path could not be read. The paths they could read are committed first.
 
-`bpm delete` takes an entity, `--location PATH`, or `--file FILE`. A file is named by its id or by one of its location paths. `--file` refuses a file with links unless `--cascade` removes them too. None of these touch bytes on disk. `bpm link --to TEMPLATE --role ROLE FILE…` and `bpm unlink --to TEMPLATE FILE…` name a file the same way, and also take a directory, which reaches every catalog location below it. The template grammar is [ADR 0002](../adr/0002-link-templates.md).
+`bpm delete` takes an entity and never touches bytes on disk. `bpm untrack PATH…` removes file locations and file rows, as described in §6. `bpm link --to TEMPLATE --role ROLE FILE…` and `bpm unlink --to TEMPLATE FILE…` name a file by its id or by one of its location paths, and also take a directory, which reaches every catalog location below it. The template grammar is [ADR 0002](../adr/0002-link-templates.md).
 
 `bpm login`, `bpm logout`, and `bpm use` are marked `*` in PRD §4.13. Core does not register them. The token typed into `bpm serve` is not `bpm login`. When a Govern client exists, those commands with no server configured fail with a short message, and they do not report that a login succeeded.
 

@@ -114,9 +114,9 @@ pub fn file_ref(raw: &str) -> Result<FileRef, Error> {
     })
 }
 
-/// The location path for `bpm delete --location`.
-pub fn location_uri(raw: &str) -> Result<String, Error> {
-    utf8(&walk::location_path(Path::new(raw))?)
+/// The location path for a `bpm untrack` operand. The path need not exist.
+pub fn location_uri(path: &Path) -> Result<String, Error> {
+    utf8(&walk::location_path(path)?)
 }
 
 pub fn track(

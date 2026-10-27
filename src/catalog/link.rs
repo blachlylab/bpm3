@@ -218,52 +218,11 @@ impl Catalog {
                     }
                 }
                 FileRef::Location { backend, uri } => {
-                    let exact: Option<String> = snapshot
-                        .query_row(
-                            "SELECT file_id FROM file_locations WHERE backend = ? AND uri = ?",
-                            params![backend, uri],
-                            |row| row.get(0),
-                        )
-                        .optional()?;
-                    if let Some(file_id) = exact {
-                        let relpath = uri.rsplit('/').next().unwrap_or(uri).to_string();
-                        sources.push(Source {
-                            file_id,
-                            uri: uri.clone(),
-                            relpath,
-                        });
-                        continue;
-                    }
-                    // Below the location: a range on the key, at a component
-                    // boundary, so /data/run1 does not reach /data/run10.
-                    let prefix = if uri.ends_with('/') {
-                        uri.clone()
-                    } else {
-                        format!("{uri}/")
-                    };
-                    let mut upper = prefix.clone();
-                    upper.pop();
-                    upper.push('0');
-                    let mut stmt = snapshot.prepare_cached(
-                        "SELECT file_id, uri FROM file_locations
-                         WHERE backend = ? AND uri >= ? AND uri < ? ORDER BY uri",
-                    )?;
-                    let found = stmt
-                        .query_map(params![backend, prefix, upper], |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                        })?
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let found = reach(&snapshot, backend, uri)?;
                     if found.is_empty() {
                         missing.push(uri.clone());
                     }
-                    for (file_id, location) in found {
-                        let relpath = location[prefix.len()..].to_string();
-                        sources.push(Source {
-                            file_id,
-                            uri: location,
-                            relpath,
-                        });
-                    }
+                    sources.extend(found);
                 }
             }
         }
@@ -461,7 +420,55 @@ impl Catalog {
     }
 }
 
-fn changed() -> Error {
+/// The locations one path reaches on a backend: itself if it is a location,
+/// otherwise every location below it, each with its path relative to `uri`.
+/// A location's relative path is its own name.
+pub(super) fn reach(conn: &Connection, backend: &str, uri: &str) -> Result<Vec<Source>, Error> {
+    let exact: Option<String> = conn
+        .query_row(
+            "SELECT file_id FROM file_locations WHERE backend = ? AND uri = ?",
+            params![backend, uri],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(file_id) = exact {
+        let relpath = uri.rsplit('/').next().unwrap_or(uri).to_string();
+        return Ok(vec![Source {
+            file_id,
+            uri: uri.to_string(),
+            relpath,
+        }]);
+    }
+    // Below the location: a range on the key, at a component boundary, so
+    // /data/run1 does not reach /data/run10.
+    let prefix = if uri.ends_with('/') {
+        uri.to_string()
+    } else {
+        format!("{uri}/")
+    };
+    let mut upper = prefix.clone();
+    upper.pop();
+    upper.push('0');
+    let mut stmt = conn.prepare_cached(
+        "SELECT file_id, uri FROM file_locations
+         WHERE backend = ? AND uri >= ? AND uri < ? ORDER BY uri",
+    )?;
+    let found = stmt
+        .query_map(params![backend, prefix, upper], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(found
+        .into_iter()
+        .map(|(file_id, location)| Source {
+            relpath: location[prefix.len()..].to_string(),
+            file_id,
+            uri: location,
+        })
+        .collect())
+}
+
+pub(super) fn changed() -> Error {
     Error::Message(
         "the catalog changed after the plan was shown; nothing was written. Run the command again"
             .into(),

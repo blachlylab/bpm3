@@ -222,7 +222,9 @@ Example: after `bpm track /data/run42`, truncating `S1_R1.fq.gz` and running `bp
 
 `bpm acknowledge` takes exactly one file, named by its file id or by the path of one of its locations. It never accepts drift for more than one file per command. There is no `--all`, and a directory, a backend, or a glob is not accepted. Drift is evidence that bytes changed, and accepting it is a decision about one file. Example: a scan of `/data/run42` reports ten `digest_mismatch` locations. Accepting them is ten `bpm acknowledge` commands, one per file. Acknowledge reads the bytes at every present location of that file. If those locations do not hold the same bytes, it refuses and changes nothing, and the operator restores or removes the wrong location first. A missing location stays missing.
 
-A move is a track of the new path plus a scan of the old one. Example: a hashed file leaves `/data/run42` and appears at `/archive/run42`. Track of the archive adds the new location on the same file id. Scan of `/data/run42` marks the old location `missing`. The old location stays on the file until the operator removes it.
+A move is a track of the new path plus a scan of the old one. Example: a hashed file leaves `/data/run42` and appears at `/archive/run42`. Track of the archive adds the new location on the same file id. Scan of `/data/run42` marks the old location `missing`. The old location stays on the file until the operator untracks it.
+
+`bpm untrack PATH` is the inverse of track. It removes the catalog locations at or under the path, filtered the way scan filters them, and removes a file row when its last location goes. It reads no bytes, and the path need not exist. A file that still has another location keeps its id, digests, metadata, and links. A file that would lose its last location while linked is refused, and nothing changes, unless `--cascade` also removes its links. Removing a file row asks first. Example: `S1.bam` is at `/data/run42` and `/archive/run42`. `bpm untrack /data/run42` leaves it with one location. A second `bpm untrack /archive/run42` removes the file. The [untrack guide](../guide/untrack.md) is the reference.
 
 ### 4.7 Provenance
 
@@ -350,9 +352,10 @@ The token typed into `bpm serve` is not `bpm login`. `bpm login` is the future c
 | `bpm create TYPE` | Create an entity | |
 | `bpm rename` | Rename a Program or Project | |
 | `bpm reparent` | Move an entity under a new legal parent | |
-| `bpm delete` | Delete an entity, a link, a location, or a file row. Never deletes bytes | |
+| `bpm delete` | Delete an entity. Never deletes bytes | |
 | `bpm meta set / get / unset` | Edit metadata on an entity or a file | |
 | `bpm track` | Add files from a path. Does not recheck files already in the catalog, except when a new path is a duplicate of one | |
+| `bpm untrack` | Remove locations at or under a path, and a file row when its last location goes. Refuses a linked file's last location without `--cascade`. Never deletes bytes | |
 | `bpm scan` | Report drift for locations already in the catalog. A local filesystem read stores BLAKE3. `--md5` also stores MD5. An object store that publishes a checksum is trusted unless a download is requested. No arguments scans every location. A backend or a path narrows that set | |
 | `bpm link` / `bpm unlink` | Attach or detach files and entities. One file, or many placed by a template, a pattern, or a mapping table. Link may create Cases, Samples, Raw Data, and Analyses on the way. One transaction | |
 | `bpm undo` | Reverse one link run: its links, the entities it created, and the roles it changed | |
@@ -444,6 +447,7 @@ Scenarios below describe Core behavior. A scenario marked deferred or unstable b
 37. **Mapping table.** A table joined on a captured barcode places each file under the subject and tissue its row names. A file with no row fails the run. Rows no file reached are reported, and are an error with `--strict`.
 38. **Roles.** A role with an uppercase letter is refused. A role new to the catalog is refused without `--new-role`. Linking an existing pair with another role is refused without `--set-role`.
 39. **Undo.** `bpm undo` of a link run removes its links and the entities it created and keeps the file rows. It refuses while a later link run has linked files to those entities, and names that run. After that run is undone, it succeeds. Undo of a `--set-role` run restores the old role.
+40. **Untrack.** A file tracked at two paths keeps its id, digests, and links when one path is untracked, and tracking that path again adds the location back to the same id. Untracking the second path removes the file row. A path deleted from disk can be untracked. A linked file's last location is refused, names the file, and changes nothing; with `--cascade` the file and its links go and the entity stays. A whitelist removes only the locations it admits and the summary counts the rest. Without a terminal and without `--yes`, a plan that removes a file row refuses and writes nothing.
 
 ### 4.16 Core release slices
 

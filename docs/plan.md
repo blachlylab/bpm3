@@ -66,6 +66,14 @@ Scenarios 33–39, in `tests/link.rs`. [ADR 0002](adr/0002-link-templates.md) is
 
 Deferred from this stage: a report of files on disk under a directory operand that are not in the catalog, and a capture-to-role map.
 
+## 4b. Untrack
+
+Scenario 40, in `tests/untrack.rs`. Issue #5. The [untrack guide](guide/untrack.md) is the user reference, and the architecture overview §6 has the steps.
+
+- `bpm untrack PATH…` with the track filters, `-n`, `--yes`, and `--cascade`. One write transaction.
+- V005 adds `untrack_runs`.
+- `bpm delete` loses `--location` and `--file`. Tests that used them move to untrack.
+
 ## 5. Import, manifests, and materialize
 
 Starts when PRD §4.9 and §4.10 are no longer marked unstable. Scenarios 23, 24, and 26.

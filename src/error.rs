@@ -75,14 +75,8 @@ pub enum Error {
     #[error("no file matches {0}")]
     FileNotFound(String),
 
-    #[error("no location {0}")]
-    LocationNotFound(String),
-
     #[error("file is not linked to {0}")]
     NotLinked(String),
-
-    #[error("file has links; unlink them first, or pass --cascade")]
-    FileLinked,
 
     #[error("acknowledge takes one file; {0} is a directory")]
     AcknowledgeDirectory(PathBuf),

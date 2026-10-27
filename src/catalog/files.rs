@@ -629,49 +629,6 @@ impl Catalog {
         Ok(())
     }
 
-    /// Remove one location. The file and its other locations stay.
-    pub fn delete_location(&mut self, backend: &str, uri: &str) -> Result<(), Error> {
-        self.require_write()?;
-        let tx = begin(&mut self.conn, &self.path)?;
-        let removed = tx.execute(
-            "DELETE FROM file_locations WHERE backend = ? AND uri = ?",
-            params![backend, uri],
-        )?;
-        if removed == 0 {
-            return Err(Error::LocationNotFound(uri.to_string()));
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Remove a file row with its locations, digests, and metadata. Refused
-    /// while links remain unless `cascade` removes them too. Bytes on disk are
-    /// never touched.
-    pub fn delete_file(&mut self, file: &FileRef, cascade: bool) -> Result<(), Error> {
-        self.require_write()?;
-        let tx = begin(&mut self.conn, &self.path)?;
-        let id = resolve_file(&tx, file)?;
-        let links: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM file_links WHERE file_id = ?",
-            [&id],
-            |row| row.get(0),
-        )?;
-        if links > 0 && !cascade {
-            return Err(Error::FileLinked);
-        }
-        for table in [
-            "file_links",
-            "file_metadata",
-            "file_digests",
-            "file_locations",
-        ] {
-            tx.execute(&format!("DELETE FROM {table} WHERE file_id = ?"), [&id])?;
-        }
-        tx.execute("DELETE FROM files WHERE id = ?", [&id])?;
-        tx.commit()?;
-        Ok(())
-    }
-
     pub fn query_files(&mut self, query: &FileQuery) -> Result<Vec<FileRow>, Error> {
         Ok(self.query_files_page(query, Window::ALL)?.rows)
     }

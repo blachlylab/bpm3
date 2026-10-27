@@ -32,6 +32,7 @@ use crate::perms;
 mod files;
 mod link;
 mod runs;
+mod untrack;
 
 pub use files::{
     AckObservation, AckOutcome, Candidate, FileQuery, ScanOutcome, ScanScope, ScanTarget, Seen,
@@ -39,6 +40,7 @@ pub use files::{
 };
 pub use link::{Action, LinkOptions, LinkPlan, LinkRunRow, PlannedLink, UndoPlan};
 pub use runs::{Run, RunKind, lock_path};
+pub use untrack::{FileLink, RemovedFile, UntrackPlan, linked_error};
 
 pub struct CatalogInfo {
     pub path: PathBuf,

@@ -1022,14 +1022,15 @@ fn scenario_17_move_with_a_digest() {
     assert_eq!(env.drift(&new), ["ok"]);
     assert_eq!(env.files(&["--drift", "missing"]).len(), 1);
 
-    // The old location stays until the operator removes it.
+    // The old location stays until the operator untracks it. Its path is
+    // gone from disk, and the file keeps its id through the new location.
     env.scan(&run42);
     assert_eq!(env.file_at(&new)["locations"].as_array().unwrap().len(), 2);
-    ok(env.bpm(&["delete", "--location", old.to_str().unwrap()]));
+    ok(env.bpm(&["untrack", old.to_str().unwrap()]));
     let file = env.file_at(&new);
     assert_eq!(file["id"], id.as_str());
     assert_eq!(file["locations"].as_array().unwrap().len(), 1);
-    fail(env.bpm(&["delete", "--location", old.to_str().unwrap()]));
+    fail(env.bpm(&["untrack", old.to_str().unwrap()]));
 }
 
 #[test]
@@ -1177,26 +1178,10 @@ fn scenario_21_unlink_and_cascade_delete_keep_files_and_bytes() {
     assert_eq!(env.files(&["--unlinked"]).len(), 1);
     assert_eq!(fs::read(&fq).unwrap(), b"reads\n");
 
-    // A file row can be removed too; its bytes stay.
-    ok(env.bpm(&["delete", "--file", fq.to_str().unwrap()]));
+    // Untracking removes the file row; its bytes stay.
+    ok(env.bpm(&["untrack", "--yes", fq.to_str().unwrap()]));
     assert_eq!(env.count("files") + env.count("file_locations"), 0);
     assert!(fq.exists());
-}
-
-#[test]
-fn deleting_a_linked_file_needs_cascade() {
-    let env = Env::new("delfile");
-    let run42 = env.data().join("run42");
-    write(&run42.join("a.fq"), b"a\n");
-    env.track(&run42);
-    env.create(&["program", "--name", "CLL"]);
-    let id = env.id_at(&run42.join("a.fq"));
-    ok(env.bpm(&["link", "--yes", "--to", "/CLL", &id, "--role", "data"]));
-    let refused = fail(env.bpm(&["delete", "--file", &id]));
-    assert!(refused.err.contains("links"), "{}", refused.err);
-    ok(env.bpm(&["delete", "--file", &id, "--cascade"]));
-    assert_eq!(env.count("files") + env.count("file_links"), 0);
-    assert_eq!(env.count("programs"), 1);
 }
 
 #[test]
@@ -1580,11 +1565,7 @@ fn symlinks_follow_the_walk_rules() {
         file["id"].as_str().unwrap()
     );
     // The link's own path names its own location.
-    ok(env.bpm(&[
-        "delete",
-        "--location",
-        flat.join("pointer.fq").to_str().unwrap(),
-    ]));
+    ok(env.bpm(&["untrack", flat.join("pointer.fq").to_str().unwrap()]));
     assert_eq!(
         env.file_at(&flat.join("target.fq"))["locations"]
             .as_array()
@@ -1677,7 +1658,11 @@ fn a_run_whose_process_died_is_marked_incomplete() {
     assert!(leftovers.is_empty());
 }
 
-/// Take a fresh catalog back to version 3 by undoing V004's renames.
+/// Take a fresh catalog back to version 4 by removing what V005 added.
+const BACK_TO_V4: &str = "DROP TABLE untrack_runs;
+     UPDATE catalog_meta SET value = '4' WHERE key = 'schema_version';";
+
+/// Take a version 4 catalog back to version 3 by undoing V004's renames.
 const BACK_TO_V3: &str = "ALTER TABLE track_runs RENAME TO ingest_runs;
      ALTER TABLE track_errors RENAME TO ingest_errors;
      DROP INDEX track_errors_run;
@@ -1707,6 +1692,7 @@ fn a_version_3_catalog_keeps_its_ingest_runs_as_track_runs() {
     env.track(&env.data());
     {
         let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V4).unwrap();
         conn.execute_batch(BACK_TO_V3).unwrap();
     }
     let refused = fail(env.bpm(&["query", "files"]));
@@ -1715,7 +1701,7 @@ fn a_version_3_catalog_keeps_its_ingest_runs_as_track_runs() {
     env.track(&env.data());
     assert_eq!(
         env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
-        "4"
+        "5"
     );
     assert_eq!(
         env.scalar("SELECT group_concat(files_created, ' ') FROM (SELECT files_created FROM track_runs ORDER BY started_at)"),
@@ -1728,6 +1714,7 @@ fn a_version_1_catalog_migrates_to_the_file_indexes() {
     let env = Env::new("v1");
     {
         let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V4).unwrap();
         conn.execute_batch(BACK_TO_V3).unwrap();
         conn.execute_batch(BACK_TO_V2).unwrap();
         conn.execute_batch(
@@ -1744,7 +1731,7 @@ fn a_version_1_catalog_migrates_to_the_file_indexes() {
     env.track(&env.data());
     assert_eq!(
         env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
-        "4"
+        "5"
     );
     assert_eq!(
         env.scalar(
@@ -1764,6 +1751,7 @@ fn a_version_2_catalog_keeps_its_links_and_their_roles_become_known() {
     let id = env.id_at(&env.data().join("a.fq"));
     {
         let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V4).unwrap();
         conn.execute_batch(BACK_TO_V3).unwrap();
         conn.execute_batch(BACK_TO_V2).unwrap();
         // A role the old `bpm link` accepted, outside the seeded list.
@@ -1781,7 +1769,7 @@ fn a_version_2_catalog_keeps_its_links_and_their_roles_become_known() {
     env.track(&env.data());
     assert_eq!(
         env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
-        "4"
+        "5"
     );
     assert_eq!(
         env.scalar("SELECT COUNT(*) FROM file_links WHERE run_id IS NULL AND role = 'control'"),

@@ -41,6 +41,11 @@ pub static MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/V004__track_runs.sql"),
         rebuilds: false,
     },
+    Migration {
+        version: 5,
+        sql: include_str!("../migrations/V005__untrack_runs.sql"),
+        rebuilds: false,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,7 +235,7 @@ mod tests {
     #[test]
     fn versions_start_at_one_and_do_not_skip() {
         check_contiguous().unwrap();
-        assert_eq!(latest(), 4);
+        assert_eq!(latest(), 5);
     }
 
     const BASE: Migration = Migration {
@@ -366,7 +371,7 @@ mod tests {
         )
         .unwrap();
         apply_list(&mut conn, MIGRATIONS).unwrap();
-        assert_eq!(version(&conn), 4);
+        assert_eq!(version(&conn), 5);
         let row: String = conn
             .query_row(
                 "SELECT r.id || ' ' || r.status || ' ' || e.message

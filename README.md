@@ -14,7 +14,7 @@ bpm init
 
 ## Path filters
 
-`bpm track` and `bpm scan` share two filters:
+`bpm track`, `bpm scan`, and `bpm untrack` share two filters:
 
 - A **blacklist** of globs to skip.
 - A **whitelist** of globs. With none set, every path that survives the blacklist is eligible. With one or more set, a path must match at least one of them.
@@ -25,7 +25,7 @@ Filters choose which paths that run considers. A path already in the catalog sta
 
 ### `~/.bpm/config.toml`
 
-The file is optional. When it is absent, both lists are empty and the built-in names still apply. `bpm track` and `bpm scan` read the file when at least one of `--blacklist` and `--whitelist` is absent. When both flags are set, the file is not read.
+The file is optional. When it is absent, both lists are empty and the built-in names still apply. `bpm track`, `bpm scan`, and `bpm untrack` read the file when at least one of `--blacklist` and `--whitelist` is absent. When both flags are set, the file is not read.
 
 ```toml
 # ~/.bpm/config.toml
