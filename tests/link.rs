@@ -84,14 +84,14 @@ impl Env {
         self.raw(&full)
     }
 
-    /// Write files under the data directory and ingest them.
+    /// Write files under the data directory and track them.
     fn files(&self, names: &[&str]) {
         for name in names {
             let path = self.data().join(name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, format!("bytes of {name}\n")).unwrap();
         }
-        ok(self.bpm(&["ingest", &self.dir()]));
+        ok(self.bpm(&["track", &self.dir()]));
     }
 
     fn scalar(&self, statement: &str) -> String {
@@ -708,7 +708,7 @@ fn template_and_operand_errors_name_the_fix() {
         "data",
         env.data().join("nowhere").to_str().unwrap(),
     ]));
-    assert!(absent.err.contains("bpm ingest"), "{}", absent.err);
+    assert!(absent.err.contains("bpm track"), "{}", absent.err);
     let s3 = fail(env.bpm(&["link", "--to", "/P/J", "--role", "data", "s3://bucket/key"]));
     assert!(s3.err.contains("not part of this milestone"), "{}", s3.err);
     let expect = fail(env.bpm(&[

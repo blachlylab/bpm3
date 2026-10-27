@@ -34,8 +34,8 @@ mod link;
 mod runs;
 
 pub use files::{
-    AckObservation, AckOutcome, Candidate, FileQuery, IngestApplied, IngestEntry, ScanOutcome,
-    ScanScope, ScanTarget, Seen,
+    AckObservation, AckOutcome, Candidate, FileQuery, ScanOutcome, ScanScope, ScanTarget, Seen,
+    TrackApplied, TrackEntry,
 };
 pub use link::{Action, LinkOptions, LinkPlan, LinkRunRow, PlannedLink, UndoPlan};
 pub use runs::{Run, RunKind, lock_path};
@@ -1018,7 +1018,7 @@ fn checks() -> Vec<Check> {
         });
     }
     for (table, runs, key) in [
-        ("ingest_errors", "ingest_runs", "run_id || ' ' || uri"),
+        ("track_errors", "track_runs", "run_id || ' ' || uri"),
         ("scan_errors", "scan_runs", "run_id || ' ' || uri"),
         (
             "link_role_changes",

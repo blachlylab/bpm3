@@ -181,33 +181,33 @@ A file has:
 
 The digest Core computes by reading bytes is BLAKE3, recorded `blake3:<hex>`. An operator can also request MD5 when a repository requires it. BLAKE3 and MD5 are two checksums of the same bytes. A checksum supplied by a storage backend is stored under that backend's algorithm and is trusted in place of a download, as §4.6 describes. Acknowledging a change moves every digest of the old bytes into the generation history, and the digests observed for the new bytes become current. A fingerprint is never written into a manifest content id.
 
-A location is one place those bytes were seen. The usual case is a single location, recorded by the ingest that created the file. Another location is added only when a later ingest finds a path, or later an object-store URI, whose full digest matches this file. Until a digest exists, a second path is a new file id and a possible-duplicate report. The operator does not create locations by hand. Each location has its own presence, so one copy can be missing while another is readable, and drift is reported per location. Linking an entity links the file id, and every present location is that file. Byte summaries count the file once. Materialize reads any location that is present. After a move, the old location stays on the file as missing until the operator removes that location. Removing a location leaves the file and its other locations in place.
+A location is one place those bytes were seen. The usual case is a single location, recorded by the track that created the file. Another location is added only when a later track finds a path, or later an object-store URI, whose full digest matches this file. Until a digest exists, a second path is a new file id and a possible-duplicate report. The operator does not create locations by hand. Each location has its own presence, so one copy can be missing while another is readable, and drift is reported per location. Linking an entity links the file id, and every present location is that file. Byte summaries count the file once. Materialize reads any location that is present. After a move, the old location stays on the file as missing until the operator removes that location. Removing a location leaves the file and its other locations in place.
 
-Zero links is the normal state of a file an ingest has not yet attached. One link attaches the file to one entity. Further links attach the same file id to other entities without a second copy of the bytes. That is how one control or reference file is associated with several samples, and how one consent document is associated with two cases. Linking the same file to another entity adds a link. Linking it again to the same entity with the same role changes nothing. A query for files under an entity returns the file when any link points there. Removing one link leaves the others. The file is unlinked when the last link is removed. In a Govern release, the file is withheld where the release reaches it only through excluded entities. A link on an included entity still includes the file. A document linked to both a Project and a Case remains available to the Project when that Case is excluded.
+Zero links is the normal state of a file a track has not yet attached. One link attaches the file to one entity. Further links attach the same file id to other entities without a second copy of the bytes. That is how one control or reference file is associated with several samples, and how one consent document is associated with two cases. Linking the same file to another entity adds a link. Linking it again to the same entity with the same role changes nothing. A query for files under an entity returns the file when any link points there. Removing one link leaves the others. The file is unlinked when the last link is removed. In a Govern release, the file is withheld where the release reaches it only through excluded entities. A link on an included entity still includes the file. A document linked to both a Project and a Case remains available to the Project when that Case is excluded.
 
 A link has a role. The role is chosen by the operator, and the vocabulary is open. Core gives no role special behavior, and no role name is reserved. Example: a companion such as a BAI is its own file, linked to the same entity as the BAM, and might be assigned role `index`. A role is spelled with lowercase letters, digits, `_`, and `-`. Each catalog keeps the roles it has seen, starting from `data`, `index`, `document`, `report`, `qc`, and `checksum`. A role not on that list needs `--new-role` the first time, so a typo does not start a second spelling. Changing the role of an existing link needs `--set-role`. A primary flag is not part of the command until we define what it changes.
 
 One `bpm link` command can link many files. A target template names the entity each file attaches to. Values come from a pattern matched against the file's name or path, or from a mapping table. The template also says which levels of the tree the command may create. The command shows its plan, asks before it creates entities, and writes everything or nothing. `bpm undo` reverses one such run. The [link guide](../guide/link.md) is the reference, and [ADR 0002](../adr/0002-link-templates.md) records why the template has this shape.
 
-### 4.6 Ingest and scan
+### 4.6 Track and scan
 
-Ingest and scan are different commands. Ingest adds files to the catalog. Scan checks files already in the catalog: it computes digests and reports drift. Inclusion and exclusion rules for a walk, such as which names to skip and how to treat symlinks, are specified in the architecture overview.
+Track and scan are different commands. Track adds files to the catalog. Scan checks files already in the catalog: it computes digests and reports drift. Inclusion and exclusion rules for a walk, such as which names to skip and how to treat symlinks, are specified in the architecture overview.
 
-The quick fingerprint and the full digest are computed at different times. The fingerprint scheme can change later. The catalog stays valid without recomputing anything: a row keeps the scheme it was written with until scan next reads its bytes and its BLAKE3 holds, and then it gets the current scheme. Until then, ingest compares a new path with that row in the row's own scheme. The schemes are in the architecture overview.
+The quick fingerprint and the full digest are computed at different times. The fingerprint scheme can change later. The catalog stays valid without recomputing anything: a row keeps the scheme it was written with until scan next reads its bytes and its BLAKE3 holds, and then it gets the current scheme. Until then, track compares a new path with that row in the row's own scheme. The schemes are in the architecture overview.
 
-- **Fingerprint, on ingest of a new file whose bytes are read.** Example: `bpm ingest /data/run42` stores a fingerprint for each new FASTQ along with its size and mtime. A second ingest of a path the catalog already has does not recompute it. The fingerprint covers at most the first 256 KiB, not the whole file.
+- **Fingerprint, on track of a new file whose bytes are read.** Example: `bpm track /data/run42` stores a fingerprint for each new FASTQ along with its size and mtime. A second track of a path the catalog already has does not recompute it. The fingerprint covers at most the first 256 KiB, not the whole file.
 - **Fingerprint again, when scan reads the bytes and sees a new size or mtime, or a fingerprint under an earlier scheme.** The stored fingerprint is left alone while the size and mtime still match and its scheme is current, and while the bytes are not read. It describes the bytes of the current digest. A copy whose bytes no longer match that digest does not replace it. Acknowledge does.
 - **BLAKE3, when scan reads a selected location.** Example: `bpm scan /data/run42` reads those files in full and stores `blake3:<hex>`. That is the first time a typical local file gets a complete digest. A later scan that reads the file again either confirms the stored digest or marks `digest_mismatch`.
-- **BLAKE3, during ingest, only to test a duplicate whose bytes are read.** A new path with the same size and the same fingerprint scheme and value as a file already in the catalog is hashed in full. If that existing file has no BLAKE3 yet, ingest hashes its bytes too. Matching digests add a location. On a local filesystem this is the only ingest that reads a whole file.
-- **A backend checksum, when the backend publishes one.** Object stores such as S3 can charge for a download and also store a checksum. Ingest and scan trust that checksum and do not download the object. An explicit flag on either command forces the download and a locally computed BLAKE3. The flag spelling, and the configurable blacklist and glob whitelist, are in the architecture overview.
+- **BLAKE3, during track, only to test a duplicate whose bytes are read.** A new path with the same size and the same fingerprint scheme and value as a file already in the catalog is hashed in full. If that existing file has no BLAKE3 yet, track hashes its bytes too. Matching digests add a location. On a local filesystem this is the only track that reads a whole file.
+- **A backend checksum, when the backend publishes one.** Object stores such as S3 can charge for a download and also store a checksum. Track and scan trust that checksum and do not download the object. An explicit flag on either command forces the download and a locally computed BLAKE3. The flag spelling, and the configurable blacklist and glob whitelist, are in the architecture overview.
 
-`bpm ingest PATH` walks a directory and records regular files that are not already in the catalog. Example: `bpm ingest /data/run42` creates a file row for each new FASTQ, with size, mtime, fingerprint, and that path as its location. The files are unlinked. A path the process cannot stat or read is reported and gets no fingerprint. The ingest commits as it goes. An interrupted ingest leaves a consistent prefix, and running it again finishes the work.
+`bpm track PATH` walks a directory and records regular files that are not already in the catalog. Example: `bpm track /data/run42` creates a file row for each new FASTQ, with size, mtime, fingerprint, and that path as its location. The files are unlinked. A path the process cannot stat or read is reported and gets no fingerprint. The track commits as it goes. An interrupted track leaves a consistent prefix, and running it again finishes the work.
 
-Ingest does not check files the catalog already knows. Example: `/data/run42/S1_R1.fq.gz` is already ingested, and someone appends to it overnight. A second `bpm ingest /data/run42` does not update that file's size, mtime, fingerprint, or digest, and it does not mark anything missing. Finding that change is scan's job.
+Track does not check files the catalog already knows. Example: `/data/run42/S1_R1.fq.gz` is already tracked, and someone appends to it overnight. A second `bpm track /data/run42` does not update that file's size, mtime, fingerprint, or digest, and it does not mark anything missing. Finding that change is scan's job.
 
-Ingest consults existing file rows, linked or not, only when a newly seen path looks like a duplicate of one of them: same size and same fingerprint scheme and value, or the same size and a matching backend checksum. It then compares digests, reading bytes only when no trusted checksum is available. If the existing file has no BLAKE3 yet and the bytes are being read, ingest hashes that file too. Matching digests make the new path another location of the existing file id. Different digests leave two file ids. If one of the two cannot be hashed, ingest reports a possible duplicate and does not merge. Example: `S1_R1.fq.gz` is ingested from `/data/run42` and later copied to `/archive/run42`. `bpm ingest /archive/run42` adds `/archive/run42/S1_R1.fq.gz` as a second location of the same file id. The old path is unchanged by that ingest. Fingerprint equality alone never merges two file ids.
+Track consults existing file rows, linked or not, only when a newly seen path looks like a duplicate of one of them: same size and same fingerprint scheme and value, or the same size and a matching backend checksum. It then compares digests, reading bytes only when no trusted checksum is available. If the existing file has no BLAKE3 yet and the bytes are being read, track hashes that file too. Matching digests make the new path another location of the existing file id. Different digests leave two file ids. If one of the two cannot be hashed, track reports a possible duplicate and does not merge. Example: `S1_R1.fq.gz` is tracked from `/data/run42` and later copied to `/archive/run42`. `bpm track /archive/run42` adds `/archive/run42/S1_R1.fq.gz` as a second location of the same file id. The old path is unchanged by that track. Fingerprint equality alone never merges two file ids.
 
-`bpm scan` compares each selected location to the catalog. On a local filesystem it computes a BLAKE3. On an object store that publishes a checksum it uses that checksum, and downloads the object only when the explicit flag is set. There is no separate hash command and no `--hash` flag. Further scan parameters are TBD. With no arguments, scan covers every location in the catalog. A storage backend limits the scan to locations on that backend. Example: a file has one location on `posix` and one on `s3`. `bpm scan s3` drift-checks only the `s3` location. A path with no backend means the local filesystem backend. Example: `bpm scan /data/run42` checks ingested locations under that path on the local filesystem, and does not add files that were never ingested.
+`bpm scan` compares each selected location to the catalog. On a local filesystem it computes a BLAKE3. On an object store that publishes a checksum it uses that checksum, and downloads the object only when the explicit flag is set. There is no separate hash command and no `--hash` flag. Further scan parameters are TBD. With no arguments, scan covers every location in the catalog. A storage backend limits the scan to locations on that backend. Example: a file has one location on `posix` and one on `s3`. `bpm scan s3` drift-checks only the `s3` location. A path with no backend means the local filesystem backend. Example: `bpm scan /data/run42` checks tracked locations under that path on the local filesystem, and does not add files that were never tracked.
 
 Drift states an operator can filter on:
 
@@ -218,11 +218,11 @@ Drift states an operator can filter on:
 | `digest_mismatch` | A digest just compared differs from the current digest of that algorithm |
 | `ok` | Present, stat unchanged, and the computed digest matches the current digest, or no digest was stored yet and the new one is recorded |
 
-Example: after `bpm ingest /data/run42`, truncating `S1_R1.fq.gz` and running `bpm scan /data/run42` marks that location `stat_changed`. It stays `stat_changed` on later scans until acknowledge accepts it. Scanning it again after the bytes differ from a stored BLAKE3 marks `digest_mismatch`. `bpm acknowledge` on that file accepts the bytes now at its locations as the next generation: previous digests stay in the history, the new digest becomes current, and the drift state returns to `ok`. Manifests already issued keep the digest they were created with.
+Example: after `bpm track /data/run42`, truncating `S1_R1.fq.gz` and running `bpm scan /data/run42` marks that location `stat_changed`. It stays `stat_changed` on later scans until acknowledge accepts it. Scanning it again after the bytes differ from a stored BLAKE3 marks `digest_mismatch`. `bpm acknowledge` on that file accepts the bytes now at its locations as the next generation: previous digests stay in the history, the new digest becomes current, and the drift state returns to `ok`. Manifests already issued keep the digest they were created with.
 
 `bpm acknowledge` takes exactly one file, named by its file id or by the path of one of its locations. It never accepts drift for more than one file per command. There is no `--all`, and a directory, a backend, or a glob is not accepted. Drift is evidence that bytes changed, and accepting it is a decision about one file. Example: a scan of `/data/run42` reports ten `digest_mismatch` locations. Accepting them is ten `bpm acknowledge` commands, one per file. Acknowledge reads the bytes at every present location of that file. If those locations do not hold the same bytes, it refuses and changes nothing, and the operator restores or removes the wrong location first. A missing location stays missing.
 
-A move is an ingest of the new path plus a scan of the old one. Example: a hashed file leaves `/data/run42` and appears at `/archive/run42`. Ingest of the archive adds the new location on the same file id. Scan of `/data/run42` marks the old location `missing`. The old location stays on the file until the operator removes it.
+A move is a track of the new path plus a scan of the old one. Example: a hashed file leaves `/data/run42` and appears at `/archive/run42`. Track of the archive adds the new location on the same file id. Scan of `/data/run42` marks the old location `missing`. The old location stays on the file until the operator removes it.
 
 ### 4.7 Provenance
 
@@ -275,7 +275,7 @@ Two input shapes:
 
 **JSON document** for anything the TSV cannot say cleanly: file links (by current path or by digest), file metadata, and derived-from pairs.
 
-A path in an import that has not been ingested fails that row with a message, and the rest of the import still commits. The operator ingests first, then imports links.
+A path in an import that has not been tracked fails that row with a message, and the rest of the import still commits. The operator tracks first, then imports links.
 
 ### 4.10 Manifests and materialize
 
@@ -319,7 +319,7 @@ Host, port, and token each have a flag and an environment variable. The flag win
 
 The token is a shared secret for interactive login. When one is configured, the UI asks the operator to type it before showing the catalog. A wrong token is refused. The token is not written into the catalog. On the default host the token is optional. If `--host` or `BPM_HOST` is set, a token is required and `bpm serve` exits with an error when neither `--token` nor `BPM_TOKEN` is set. Example: `BPM_HOST=0.0.0.0 BPM_TOKEN=lab BPM_PORT=3000 bpm serve` listens on every interface and will not serve pages until the operator enters `lab`.
 
-Core v1 is a read-only web interface. The browser shows the catalog and does not change it. Writes stay on the CLI. Example: a link created with `bpm link` appears on the file page after refresh. The page has no control that edits metadata, acknowledges drift, ingests, scans, deletes, or builds a manifest.
+Core v1 is a read-only web interface. The browser shows the catalog and does not change it. Writes stay on the CLI. Example: a link created with `bpm link` appears on the file page after refresh. The page has no control that edits metadata, acknowledges drift, tracks, scans, deletes, or builds a manifest.
 
 Core v2 is a read-write web interface. What it can change, and the UI for those changes, is TBD.
 
@@ -327,7 +327,7 @@ The v1 pages are:
 
 | Page | What the operator can do |
 | --- | --- |
-| Home | Summary counts, drift, unlinked files, recent ingests and scans |
+| Home | Summary counts, drift, unlinked files, recent tracks and scans |
 | Tree | Expand the entity tree, open an entity |
 | Entity | Read metadata, see children and linked files, follow the breadcrumb |
 | File | Id, fingerprint, digests, locations, drift, and links. Derived-from waits for the §4.7 milestone |
@@ -352,7 +352,7 @@ The token typed into `bpm serve` is not `bpm login`. `bpm login` is the future c
 | `bpm reparent` | Move an entity under a new legal parent | |
 | `bpm delete` | Delete an entity, a link, a location, or a file row. Never deletes bytes | |
 | `bpm meta set / get / unset` | Edit metadata on an entity or a file | |
-| `bpm ingest` | Add files from a path. Does not recheck files already in the catalog, except when a new path is a duplicate of one | |
+| `bpm track` | Add files from a path. Does not recheck files already in the catalog, except when a new path is a duplicate of one | |
 | `bpm scan` | Report drift for locations already in the catalog. A local filesystem read stores BLAKE3. `--md5` also stores MD5. An object store that publishes a checksum is trusted unless a download is requested. No arguments scans every location. A backend or a path narrows that set | |
 | `bpm link` / `bpm unlink` | Attach or detach files and entities. One file, or many placed by a template, a pattern, or a mapping table. Link may create Cases, Samples, Raw Data, and Analyses on the way. One transaction | |
 | `bpm undo` | Reverse one link run: its links, the entities it created, and the roles it changed | |
@@ -361,7 +361,7 @@ The token typed into `bpm serve` is not `bpm login`. `bpm login` is the future c
 | `bpm repair` | List rows that break the catalog's integrity. `--apply` removes them | |
 | `bpm serve` | Web UI. Default `127.0.0.1:3000`. `--host` / `BPM_HOST`, `--port` / `BPM_PORT`, `--token` / `BPM_TOKEN`. Token required when the host is set. v1 is read-only | |
 | `bpm query` | Structured query. Flags are a sketch (§4.8) | * |
-| `bpm import` | TSV or JSON ingest (§4.9) | * |
+| `bpm import` | TSV or JSON import (§4.9) | * |
 | `bpm manifest` | Create or fetch a manifest (§4.10) | * |
 | `bpm materialize` | Stage a manifest onto a destination (§4.10) | * |
 | `bpm derive` | Add or remove a derived-from edge (§4.7) | * |
@@ -392,7 +392,7 @@ bpm meta set <raw-uuid> assay WES
 bpm meta set <raw-uuid> batch_id RUN42
 ```
 
-They run `bpm ingest` on the run directory. The FASTQs appear as unlinked files. They link `S1_R1.fq.gz` and `S1_R2.fq.gz` to the Raw Data UUID with role `data`: `bpm link --to <raw-uuid> --role data S1_R1.fq.gz S1_R2.fq.gz`. For a whole run they would instead let one command build the Cases, Samples, and Raw Data nodes from the file names, as the [link guide](../guide/link.md) shows. The recommended practice there is one Raw Data node per FASTQ. A pair on one node, as here, is also allowed. A slide for the same participant is a second Sample under the same Case, with `sample_kind=slide` and `source_sample` set to the first Sample's UUID. The SVS is linked to a Raw Data node under that slide Sample.
+They run `bpm track` on the run directory. The FASTQs appear as unlinked files. They link `S1_R1.fq.gz` and `S1_R2.fq.gz` to the Raw Data UUID with role `data`: `bpm link --to <raw-uuid> --role data S1_R1.fq.gz S1_R2.fq.gz`. For a whole run they would instead let one command build the Cases, Samples, and Raw Data nodes from the file names, as the [link guide](../guide/link.md) shows. The recommended practice there is one Raw Data node per FASTQ. A pair on one node, as here, is also allowed. A slide for the same participant is a second Sample under the same Case, with `sample_kind=slide` and `source_sample` set to the first Sample's UUID. The SVS is linked to a Raw Data node under that slide Sample.
 
 While that Case is the only entity under the Project with that subject id, its address is `/CLL/WES-relapse/subject_id:CLL-001`.
 
@@ -413,20 +413,20 @@ Scenarios below describe Core behavior. A scenario marked deferred or unstable b
 7. **Metadata.** Set, replace, and unset work for an arbitrary key. A second set replaces the value. The value is returned unchanged by query. A key or value containing `:` or `/` is rejected. A selector for a key (`subject_id:`), a value (`:CLL-001`), and a pair (`subject_id:CLL-001`) each returns the Case. The path `/CLL/WES-relapse/subject_id:CLL-001` resolves to that Case when it is the only match, and fails when two entities under that Project share the pair. When §4.10 is finalized, a manifest returns the same metadata.
 8. **Conventional keys.** `sample_kind`, `assay`, `consent`, and `embargo_until` round-trip and are usable in `--where`. An unknown `sample_kind` is stored.
 9. **Isolation of metadata.** A `consent` value on a Case is returned on the Case. It is not copied onto the Sample. `--under` the Case still returns the Sample.
-10. **Ingest.** `bpm ingest` of a directory of regular files creates unlinked file rows with size, mtime, fingerprint, and a location. No file payload is written into the catalog.
-11. **Second ingest.** An immediate second ingest of the same directory creates no new file ids and does not change size, mtime, fingerprint, or digest.
-12. **Ingest ignores existing drift.** Changing a file's size on disk and ingesting its directory again leaves the catalog's size, mtime, and digest as they were. `bpm scan` of that path then marks `stat_changed`.
-13. **Duplicate ingest.** After `bpm ingest` of a file and `bpm scan` of it, ingesting a second path with the same bytes adds that path as a location of the same file id. The file may be linked or unlinked. The same second path, ingested before any BLAKE3 exists, causes ingest to hash both copies and still results in one file id when the digests match.
-14. **Unreadable path.** A file the process cannot read is reported on the ingest. It does not receive a fingerprint.
-15. **Stat drift.** Changing the size of an ingested file and running `bpm scan` on its path marks `stat_changed` and keeps the file id. A backend argument scans only locations on that backend. A file with one location on the selected backend and another elsewhere is checked only on the selected backend. Object-store backends are the later milestone in §3, and this half of the scenario runs when a second backend exists.
+10. **Track.** `bpm track` of a directory of regular files creates unlinked file rows with size, mtime, fingerprint, and a location. No file payload is written into the catalog.
+11. **Second track.** An immediate second track of the same directory creates no new file ids and does not change size, mtime, fingerprint, or digest.
+12. **Track ignores existing drift.** Changing a file's size on disk and tracking its directory again leaves the catalog's size, mtime, and digest as they were. `bpm scan` of that path then marks `stat_changed`.
+13. **Duplicate track.** After `bpm track` of a file and `bpm scan` of it, tracking a second path with the same bytes adds that path as a location of the same file id. The file may be linked or unlinked. The same second path, tracked before any BLAKE3 exists, causes track to hash both copies and still results in one file id when the digests match.
+14. **Unreadable path.** A file the process cannot read is reported on the track. It does not receive a fingerprint.
+15. **Stat drift.** Changing the size of a tracked file and running `bpm scan` on its path marks `stat_changed` and keeps the file id. A backend argument scans only locations on that backend. A file with one location on the selected backend and another elsewhere is checked only on the selected backend. Object-store backends are the later milestone in §3, and this half of the scenario runs when a second backend exists.
 16. **Digest drift and acknowledge.** `bpm scan` of a local file stores BLAKE3. Modifying the file and scanning again marks `digest_mismatch`. `bpm acknowledge` sets the new digest current and retains the previous digest in the generation history. `bpm acknowledge` of a directory fails and changes nothing. Acknowledging one of two drifted files leaves the other `digest_mismatch`.
-17. **Move with a digest.** A file that scan has hashed is moved. Ingest of the new path keeps the file id and adds the new location. Scan of the old path marks the old location `missing`. The old location remains until the operator removes it.
-18. **Move without a readable source.** The same move, when the old bytes are already gone and no BLAKE3 was stored, yields a missing location after scan of the old path, a new file id from ingest of the new path, and a possible-duplicate report. The two ids are not merged.
-19. **Two copies.** Two paths with identical bytes that are both ingested are one file id with two locations once their BLAKE3 values have been compared.
+17. **Move with a digest.** A file that scan has hashed is moved. Track of the new path keeps the file id and adds the new location. Scan of the old path marks the old location `missing`. The old location remains until the operator removes it.
+18. **Move without a readable source.** The same move, when the old bytes are already gone and no BLAKE3 was stored, yields a missing location after scan of the old path, a new file id from track of the new path, and a possible-duplicate report. The two ids are not merged.
+19. **Two copies.** Two paths with identical bytes that are both tracked are one file id with two locations once their BLAKE3 values have been compared.
 20. **Link.** Linking a file to a Raw Data node with role `data` makes `bpm query files --under` the Case return it. A second link to another entity succeeds. Unlinking one leaves the other.
 21. **Unlink and delete.** Unlinking leaves the file row. Deleting a Program that still has a Project fails. `bpm delete --cascade` on that Program removes descendant entities and links, leaves previously linked files as unlinked rows, and leaves source bytes on disk.
 22. **Provenance walks. Deferred (§4.7).** A Project-level file with derived-from edges to two BAMs under two Cases is returned by `impact --under` each Case. `lineage` on the Project file returns both BAMs and both Cases.
-23. **Import. Unstable (§4.9).** A wide TSV creates the tree and metadata. A JSON import links ingested paths. A link that names a path not yet ingested fails that row and keeps the rows that succeeded.
+23. **Import. Unstable (§4.9).** A wide TSV creates the tree and metadata. A JSON import links tracked paths. A link that names a path not yet tracked fails that row and keeps the rows that succeeded.
 24. **Manifest identity. Unstable (§4.10).** Two manifest generations with no intervening edit return the same `content_id` and the same stored `snapshot_id`. After a location change that leaves bytes, digests, and metadata the same, a new generation returns the original `content_id`, prints a snapshot hash of the current locations, and leaves the stored snapshot in place until `--refresh-snapshot`. `--require-hash` fails while any included file lacks BLAKE3, and succeeds after a scan that read the bytes has stored that digest.
 25. **Policy is data.** A Case with `embargo_until` in the future is still returned by query. When §4.10 is finalized, that Case is still present in the manifest.
 26. **Materialize. Unstable (§4.10).** Materialize copies bytes to the destination and writes the manifest JSON. Source bytes and source mtimes are unchanged. An existing destination collision fails the run unless `--force` is set. A missing location writes a materialize report with `partial: true` and the missing file ids, exits non-zero, and leaves the catalog manifest's content body unchanged.
@@ -437,7 +437,7 @@ Scenarios below describe Core behavior. A scenario marked deferred or unstable b
 31. **Benchmark.** A synthetic catalog of 1,000,000 files and 5,000,000 metadata entries runs `files --under` a Project and `entities --where` a metadata key. The harness records elapsed time. The target is interactive response, a few seconds, on one workstation.
 32. **Repair.** A Project whose Program row was removed outside `bpm` makes `bpm query entities` fail with a message that names `bpm repair`, not a crash. `bpm repair` lists that Project and exits non-zero. `bpm repair --apply` removes it with its Cases and their metadata and links, keeps the file rows, and a second `bpm repair` reports the catalog consistent. `bpm reparent` can instead move the Project under an existing Program.
 
-33. **Bulk link.** With BAMs and their indexes ingested from one directory and no Cases, one `bpm link` with the template `/P/J/case[subject_id:{1}]?/sample?/raw_data?/analysis[pipeline:bwa]?` and a pattern that captures the subject creates one Case, Sample, Raw Data, and Analysis per subject. Each BAM and its index share that Analysis, and the Case carries `subject_id`. `-n` writes nothing. Without a terminal and without `--yes`, the run refuses and writes nothing. Running it again writes nothing.
+33. **Bulk link.** With BAMs and their indexes tracked from one directory and no Cases, one `bpm link` with the template `/P/J/case[subject_id:{1}]?/sample?/raw_data?/analysis[pipeline:bwa]?` and a pattern that captures the subject creates one Case, Sample, Raw Data, and Analysis per subject. Each BAM and its index share that Analysis, and the Case carries `subject_id`. `-n` writes nothing. Without a terminal and without `--yes`, the run refuses and writes nothing. Running it again writes nothing.
 34. **All or nothing.** With Cases for two of three subjects, a template whose case step must exist fails for the third subject, names it, and creates nothing for the other two.
 35. **Expected shape.** With one Raw Data node per FASTQ and `--expect sample=2`, a subject with R1 and no R2 fails the run and is named. Two lanes that the template does not tell apart are caught by `--expect raw_data=1`.
 36. **One Sample, two runs.** Two runs that link WES and then WGS reads with `sample?` leave one Sample with two Raw Data nodes. With a second Sample present, `sample?` fails as ambiguous.
@@ -452,7 +452,7 @@ The scenarios in §4.15 that are not marked deferred or unstable are the contrac
 | Slice | Contents |
 | --- | --- |
 | A | Catalogs, entity tree, metadata, query, SQL hatch, repair |
-| B | Ingest, scan, fingerprint, locations, drift, acknowledge, link |
+| B | Track, scan, fingerprint, locations, drift, acknowledge, link |
 | C | Import, manifests, materialize. Derived-from edges, impact, lineage, and command history are a later milestone (§4.7) |
 | D | Read-only web UI (Core v1). Read-write UI is Core v2 and is TBD |
 
@@ -470,7 +470,7 @@ Machine clients use the OAuth client-credentials grant. A client id maps to a se
 
 Roles are assigned per catalog. A user's permissions on a catalog are the union of their roles there.
 
-| Role | Read | Edit catalog, ingest, and scan | Draft a release | Approve a release | Manage users and export audit |
+| Role | Read | Edit catalog, track, and scan | Draft a release | Approve a release | Manage users and export audit |
 | --- | --- | --- | --- | --- | --- |
 | Viewer | yes | | | | |
 | Curator | yes | yes | | | |
@@ -484,7 +484,7 @@ Failed authorization attempts are audited. The web UI and the remote CLI enforce
 
 ### 5.2 What the server operates on
 
-`bpmd` serves the web UI and the API the `bpm` binary calls after `bpm login`. Remote clients use `bpm query`, `bpm manifest`, ingest, scan, link, and release commands. They do not get `bpm sql` in the first Govern release.
+`bpmd` serves the web UI and the API the `bpm` binary calls after `bpm login`. Remote clients use `bpm query`, `bpm manifest`, track, scan, link, and release commands. They do not get `bpm sql` in the first Govern release.
 
 File bytes stay in the institution's storage. The server does not proxy BAM or SVS contents through the browser. Materialize and disbursement run where the storage is mounted, and they write a destination the operator names. The web UI shows paths, digests, and drift; it does not stream the research files.
 
@@ -550,7 +550,7 @@ These describe server behavior. They become tests when Govern is built.
 
 1. A user who has not logged in receives no catalog data from `bpmd`.
 2. A Viewer can query and cannot create an entity, scan, or approve a release.
-3. A Service account can ingest, scan, and link, and cannot approve a release.
+3. A Service account can track, scan, and link, and cannot approve a release.
 4. A release whose allow-list is `GRU` excludes a Case with no `consent`, a Case with `consent=DS`, and a Case with a future `embargo_until`, and includes a Case with `consent=GRU` whose embargo date has passed.
 5. Descendants and directly linked files of an excluded Case are excluded with a reason that points at the Case.
 6. A joint file on the Project, derived from a BAM under an excluded Case and a BAM under an included Case, is withheld as impacted and is absent from the package manifest.
@@ -590,7 +590,7 @@ These were settled before the draft, or chosen while writing it so the acceptanc
 | Discovery | Scan first, link second. Unlinked files are kept. |
 | Linking | One target template with typed steps and per-step modes, not upstream and downstream flags. Every level is written. One transaction, a plan first, a question before creating entities, and undo by run (ADR 0002). |
 | Identity | Stable file id, plus tagged digests, plus locations. Fingerprint suggests, and only within one scheme. BLAKE3 confirms when bytes are read. A published backend checksum is trusted. |
-| Ingest and scan | `bpm ingest` adds new paths and consults the catalog only for duplicates. `bpm scan` reports drift for locations already ingested, computing BLAKE3 when it reads bytes. `--md5` is an optional second pass. |
+| Track and scan | `bpm track` adds new paths and consults the catalog only for duplicates. `bpm scan` reports drift for locations already tracked, computing BLAKE3 when it reads bytes. `--md5` is an optional second pass. |
 | License | Apache-2.0. |
 | In-place change | The file id stays. Acknowledge starts a new digest generation and keeps the old one. |
 | Policy in Core | Stored and returned. Query and manifest do not filter on it. |
@@ -606,7 +606,7 @@ These were settled before the draft, or chosen while writing it so the acceptanc
 Answers here would change this draft.
 
 1. **Sample-to-sample lineage.** `source_sample` is a string with no foreign key. If officers need "this slide came from that aliquot" to drive censoring the way derived-from does for files, it has to become a real edge. Today only file edges drive impact.
-2. **Format parsers.** Core v1 ingests metadata the operator supplies. It does not read FASTQ, BAM, VCF, or SVS headers. Parsers would improve augmentation and would widen Core's scope.
+2. **Format parsers.** Core v1 records metadata the operator supplies. It does not read FASTQ, BAM, VCF, or SVS headers. Parsers would improve augmentation and would widen Core's scope.
 3. **BPM-Lite import.** No migration acceptance test until we know whether BPM-Lite data needs to land in a Core catalog.
 4. **Consent allow-list strictness.** A missing `consent` excludes a node from a Govern release. Confirm that this is the institutional default, including for catalogs that mix human and non-human data.
 5. **Link conveniences.** Two `bpm link` features were set aside. One reports files on disk under a directory operand that are not in the catalog, which needs a decision on which blacklist and whitelist apply. The other maps a captured value to a role (`--role-map bam=data,bai=index`).

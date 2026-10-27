@@ -10,7 +10,7 @@ use xxhash_rust::xxh3::Xxh3;
 use crate::model::Fingerprint;
 
 /// XXH3-128 of the first [`HEAD`] bytes, or the whole file when it is
-/// shorter. What ingest, scan, and acknowledge write. The size is compared
+/// shorter. What track, scan, and acknowledge write. The size is compared
 /// beside it, so it is not hashed. The window belongs to this name; a
 /// different one is a new scheme name.
 pub const HEAD_SCHEME: &str = "xxh3-128-head-256k";

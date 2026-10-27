@@ -36,6 +36,11 @@ pub static MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/V003__link_runs.sql"),
         rebuilds: false,
     },
+    Migration {
+        version: 4,
+        sql: include_str!("../migrations/V004__track_runs.sql"),
+        rebuilds: false,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +230,7 @@ mod tests {
     #[test]
     fn versions_start_at_one_and_do_not_skip() {
         check_contiguous().unwrap();
-        assert_eq!(latest(), 3);
+        assert_eq!(latest(), 4);
     }
 
     const BASE: Migration = Migration {
@@ -348,5 +353,44 @@ mod tests {
         // again. Inside the transaction it sees version 2 and does nothing.
         apply_one(&mut conn, &list[1], 2).unwrap();
         assert_eq!(version(&conn), 2);
+    }
+
+    #[test]
+    fn v004_keeps_ingest_runs_and_their_errors_as_track_runs() {
+        let mut conn = fresh();
+        apply_list(&mut conn, &MIGRATIONS[..3]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO ingest_runs (id, backend, root_uri, started_at, status, files_seen, files_created)
+                 VALUES ('r1', 'posix', 'file:///data', '2026-10-01T00:00:00Z', 'complete', 2, 1);
+             INSERT INTO ingest_errors (run_id, uri, message) VALUES ('r1', 'file:///data/x', 'denied');",
+        )
+        .unwrap();
+        apply_list(&mut conn, MIGRATIONS).unwrap();
+        assert_eq!(version(&conn), 4);
+        let row: String = conn
+            .query_row(
+                "SELECT r.id || ' ' || r.status || ' ' || e.message
+                 FROM track_runs r JOIN track_errors e ON e.run_id = r.id",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row, "r1 complete denied");
+        assert!(!table_exists(&conn, "ingest_runs").unwrap());
+        assert!(!table_exists(&conn, "ingest_errors").unwrap());
+        let index: String = conn
+            .query_row(
+                "SELECT tbl_name FROM sqlite_schema WHERE type = 'index' AND name = 'track_errors_run'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, "track_errors");
+        // The foreign key followed the rename: the run still cannot be deleted
+        // while it has errors.
+        assert!(
+            conn.execute("DELETE FROM track_runs WHERE id = 'r1'", [])
+                .is_err()
+        );
     }
 }

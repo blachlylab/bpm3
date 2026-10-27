@@ -1,4 +1,4 @@
-//! The ingest walk: depth-first, sorted by name, symlinks handled per the
+//! The track walk: depth-first, sorted by name, symlinks handled per the
 //! architecture overview §6.
 //!
 //! Every directory is walked by its canonical path, so a file reached through
@@ -105,7 +105,7 @@ impl Walker {
                     return self.error(
                         &path,
                         format!(
-                            "outside_root: the link points to {}, outside the ingest root",
+                            "outside_root: the link points to {}, outside the track root",
                             target.display()
                         ),
                     );
@@ -167,7 +167,7 @@ fn read_sorted(dir: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 /// An absolute, normalized path for a location the operator names, in the form
-/// ingest recorded it. A directory is canonicalized in full. For anything else
+/// track recorded it. A directory is canonicalized in full. For anything else
 /// the parent is canonicalized and the final name kept, so a link to a file
 /// names that link's own location. The longest part of the parent that exists
 /// is canonicalized, so a path that has gone away still maps through symlinked

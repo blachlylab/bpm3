@@ -269,7 +269,7 @@ impl Catalog {
         }
         if !missing.is_empty() {
             return Err(Error::Message(format!(
-                "no catalog location at or under {}; run `bpm ingest` first",
+                "no catalog location at or under {}; run `bpm track` first",
                 missing.join(", ")
             )));
         }

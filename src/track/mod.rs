@@ -1,4 +1,4 @@
-//! `bpm ingest`, `bpm scan`, and `bpm acknowledge`: the filesystem side.
+//! `bpm track`, `bpm scan`, and `bpm acknowledge`: the filesystem side.
 //!
 //! Everything here that reads bytes runs with the catalog lock released. Each
 //! batch of [`BATCH`] files is hashed first and then handed to the catalog,
@@ -19,8 +19,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::catalog::{
-    AckObservation, AckOutcome, Candidate, Catalog, IngestEntry, Run, RunKind, ScanOutcome,
-    ScanScope, ScanTarget, Seen,
+    AckObservation, AckOutcome, Candidate, Catalog, Run, RunKind, ScanOutcome, ScanScope,
+    ScanTarget, Seen, TrackEntry,
 };
 use crate::error::Error;
 use crate::model::{BACKENDS, Drift, FileRef, FileRow, Fingerprint, POSIX};
@@ -30,7 +30,7 @@ use walk::{WalkItem, Walker};
 /// Files per committed batch. Internal; a crash keeps every committed batch.
 pub const BATCH: usize = 1000;
 
-/// Threads that stat and fingerprint one ingest batch. On a network
+/// Threads that stat and fingerprint one track batch. On a network
 /// filesystem each read waits on a round trip, so several in flight help.
 const WORKERS: usize = 8;
 
@@ -44,7 +44,7 @@ const SCAN_REDRAW: Duration = Duration::from_millis(500);
 const SCAN_LOG_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default)]
-pub struct IngestReport {
+pub struct TrackReport {
     pub run_id: Option<Uuid>,
     pub seen: u64,
     pub created: u64,
@@ -119,11 +119,11 @@ pub fn location_uri(raw: &str) -> Result<String, Error> {
     utf8(&walk::location_path(Path::new(raw))?)
 }
 
-pub fn ingest(
+pub fn track(
     catalog: &mut Catalog,
     root: &Path,
     filter: &PathFilter,
-) -> Result<IngestReport, Error> {
+) -> Result<TrackReport, Error> {
     let root = fs::canonicalize(root)
         .map_err(|err| Error::Message(format!("{}: {err}", root.display())))?;
     if !root.is_dir() {
@@ -133,24 +133,24 @@ pub fn ingest(
         )));
     }
     let root_uri = utf8(&root)?;
-    announce("ingest", &root.display().to_string(), filter);
-    let run = catalog.start_run(RunKind::Ingest, POSIX, &root_uri)?;
-    let mut report = IngestReport {
+    announce("track", &root.display().to_string(), filter);
+    let run = catalog.start_run(RunKind::Track, POSIX, &root_uri)?;
+    let mut report = TrackReport {
         run_id: Some(run.id),
-        ..IngestReport::default()
+        ..TrackReport::default()
     };
-    let result = ingest_walk(catalog, &run, &root, filter, &mut report);
+    let result = track_walk(catalog, &run, &root, filter, &mut report);
     let (seen, created) = (report.seen, report.created);
     catalog.finish_run(run, result.is_ok(), seen, created)?;
     result.map(|()| report)
 }
 
-fn ingest_walk(
+fn track_walk(
     catalog: &mut Catalog,
     run: &Run,
     root: &Path,
     filter: &PathFilter,
-    report: &mut IngestReport,
+    report: &mut TrackReport,
 ) -> Result<(), Error> {
     let mut paths = Vec::with_capacity(BATCH);
     let mut errors = Vec::new();
@@ -173,7 +173,7 @@ fn ingest_walk(
                 report.seen += 1;
                 paths.push(path);
                 if paths.len() == BATCH {
-                    ingest_batch(
+                    track_batch(
                         catalog,
                         run,
                         std::mem::take(&mut paths),
@@ -185,7 +185,7 @@ fn ingest_walk(
             }
         }
     }
-    ingest_batch(catalog, run, paths, errors, report, &mut progress)
+    track_batch(catalog, run, paths, errors, report, &mut progress)
 }
 
 /// One path of a batch, before its bytes are read.
@@ -204,12 +204,12 @@ enum Read {
 
 /// Plan one batch with no lock held, then apply it. The stats and fingerprint
 /// reads run on [`WORKERS`] threads; the plan is made in path order.
-fn ingest_batch(
+fn track_batch(
     catalog: &mut Catalog,
     run: &Run,
     paths: Vec<PathBuf>,
     mut errors: Vec<(String, String)>,
-    report: &mut IngestReport,
+    report: &mut TrackReport,
     progress: &mut Progress,
 ) -> Result<(), Error> {
     let mut in_batch = HashSet::new();
@@ -237,7 +237,7 @@ fn ingest_batch(
     })
     .into_iter();
 
-    let mut entries: Vec<IngestEntry> = Vec::new();
+    let mut entries: Vec<TrackEntry> = Vec::new();
     // BLAKE3 of existing files hashed during this batch, by file id.
     let mut hashed: HashMap<Uuid, (String, String)> = HashMap::new();
     for probe in probes {
@@ -273,7 +273,7 @@ fn ingest_batch(
                 // The path is recorded, with no fingerprint, so a later scan
                 // can read it once it is readable.
                 errors.push((uri, format!("cannot read: {err}")));
-                entries.push(IngestEntry::New {
+                entries.push(TrackEntry::New {
                     fingerprint: None,
                     blake3: None,
                     seen: vec![seen],
@@ -292,7 +292,7 @@ fn ingest_batch(
             print,
         )?;
     }
-    let applied = catalog.apply_ingest(run, &entries, &errors)?;
+    let applied = catalog.apply_track(run, &entries, &errors)?;
     report.created += applied.created;
     report.located += applied.located;
     report.copies += applied.copies;
@@ -320,7 +320,7 @@ fn parallel_map<T: Sync, R: Send>(items: &[T], each: impl Fn(&T) -> R + Sync) ->
             .collect();
         workers
             .into_iter()
-            .flat_map(|worker| worker.join().expect("an ingest worker panicked"))
+            .flat_map(|worker| worker.join().expect("a track worker panicked"))
             .collect()
     });
     done.sort_unstable_by_key(|(index, _)| *index);
@@ -507,17 +507,17 @@ fn log_line(message: impl std::fmt::Display) {
 #[allow(clippy::too_many_arguments)]
 fn plan_new_path(
     catalog: &Catalog,
-    entries: &mut Vec<IngestEntry>,
+    entries: &mut Vec<TrackEntry>,
     hashed: &mut HashMap<Uuid, (String, String)>,
     errors: &mut Vec<(String, String)>,
-    report: &mut IngestReport,
+    report: &mut TrackReport,
     path: &Path,
     seen: Seen,
     print: Fingerprint,
 ) -> Result<(), Error> {
     let mut candidates = catalog.fingerprint_matches(seen.size, &print)?;
     // Rows written under an earlier scheme are compared in that scheme, so a
-    // copy of a file ingested before the scheme changed is still found. This
+    // copy of a file tracked before the scheme changed is still found. This
     // reads the new path again only when a row of that size exists.
     for scheme in catalog.other_schemes(seen.size, &print.scheme)? {
         // A path that cannot be read here fails the full read below as well.
@@ -529,7 +529,7 @@ fn plan_new_path(
         .iter()
         .enumerate()
         .filter_map(|(index, entry)| match entry {
-            IngestEntry::New {
+            TrackEntry::New {
                 fingerprint: Some(other),
                 seen: others,
                 ..
@@ -538,7 +538,7 @@ fn plan_new_path(
         })
         .collect();
     if candidates.is_empty() && pending.is_empty() {
-        entries.push(IngestEntry::New {
+        entries.push(TrackEntry::New {
             fingerprint: Some(print),
             blake3: None,
             seen: vec![seen],
@@ -557,12 +557,12 @@ fn plan_new_path(
                 .map(|candidate| candidate.file_id.to_string())
                 .collect();
             for index in pending {
-                if let IngestEntry::New { seen: others, .. } = &entries[index] {
+                if let TrackEntry::New { seen: others, .. } = &entries[index] {
                     of.push(others[0].uri.clone());
                 }
             }
             report.possible_duplicates.push((seen.uri.clone(), of));
-            entries.push(IngestEntry::New {
+            entries.push(TrackEntry::New {
                 fingerprint: None,
                 blake3: None,
                 seen: vec![seen],
@@ -572,7 +572,7 @@ fn plan_new_path(
     };
     let mut unhashable = Vec::new();
     for index in pending {
-        let IngestEntry::New {
+        let TrackEntry::New {
             blake3,
             seen: others,
             ..
@@ -611,7 +611,7 @@ fn plan_new_path(
             continue;
         };
         if theirs == mine {
-            entries.push(IngestEntry::Located {
+            entries.push(TrackEntry::Located {
                 file_id: candidate.file_id,
                 blake3: mine,
                 verified,
@@ -626,7 +626,7 @@ fn plan_new_path(
             .possible_duplicates
             .push((seen.uri.clone(), unhashable));
     }
-    entries.push(IngestEntry::New {
+    entries.push(TrackEntry::New {
         fingerprint: Some(print),
         blake3: Some(mine),
         seen: vec![seen],

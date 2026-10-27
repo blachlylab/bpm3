@@ -8,7 +8,7 @@ This is the build order for the `bpm` binary. Behavior is the PRD. Mechanism is 
 
 PRD §4.16 is what the Core release contains. The order below is the order to build it. That section lists import and manifests before the web UI. They wait here, because §4.9 and §4.10 are still unstable. The read-only UI does not need them.
 
-One Cargo package. The modules are the ones in the architecture overview: `model`, `catalog`, `ingest`, `query`, `cli`, and `web`. The catalog trait is the seam. SQL stays inside the SQLite implementation.
+One Cargo package. The modules are the ones in the architecture overview: `model`, `catalog`, `track`, `query`, `cli`, and `web`. The catalog trait is the seam. SQL stays inside the SQLite implementation.
 
 ## What "done" means
 
@@ -23,13 +23,13 @@ PRD slice A. Scenarios 1–9, 25, 27, 30, and 32.
 - `bpm sql`, read-only unless `--write`. No command history.
 - Enough of `bpm query` to answer the selectors in §4.4 for the scenarios above. The flag spelling is the §4.8 sketch and may change. Impact and lineage are not in this stage.
 
-This stage is a notebook for Programs, Projects, and the nodes under them. It does not ingest files.
+This stage is a notebook for Programs, Projects, and the nodes under them. It does not track files.
 
 ## 2. File indexer
 
 PRD slice B, local filesystem only. Scenarios 10–21, except the object-store half of scenario 15.
 
-- Ingest, the first fingerprint scheme (the scheme name stored on the row), BLAKE3 on scan and on duplicate confirmation, locations, drift, acknowledge, link, and unlink.
+- Track, the first fingerprint scheme (the scheme name stored on the row), BLAKE3 on scan and on duplicate confirmation, locations, drift, acknowledge, link, and unlink.
 - The catalog lock is held only around each committed batch. Hashing the next batch happens with the lock released. A per-run flock is how a crash is detected.
 - The built-in blacklist, and a global blacklist and whitelist in `~/.bpm/config.toml`. `--blacklist` and `--whitelist` replace those lists for one run.
 - `bpm scan --md5` when an archive requires MD5. It is off unless the flag is passed.
@@ -38,7 +38,7 @@ After this stage the benchmark catalog can be loaded. Scenario 31 runs before st
 
 ## 3. Object stores
 
-A later Core milestone (PRD §3), built on the same file id, drift states, and link rules as the local filesystem. The object-store half of scenario 15, plus ingest and scan of an S3 prefix.
+A later Core milestone (PRD §3), built on the same file id, drift states, and link rules as the local filesystem. The object-store half of scenario 15, plus track and scan of an S3 prefix.
 
 - Trust a checksum the backend publishes. Do not download the body unless asked.
 - The spelling of the download flag is deferred until this stage starts.

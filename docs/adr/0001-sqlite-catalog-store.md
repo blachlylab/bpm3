@@ -19,8 +19,8 @@ BPM's requirements, from the PRD and the architecture overview:
 - Expected scale per catalog: about 100k entities, about 1M files, and 10 to 100M metadata pairs, most of them on files.
 - Interactive queries, meaning a few seconds at most, on one workstation (PRD §2, scenario 31).
 - A six-level entity tree whose integrity matters. Rename, reparent, and cascade delete are ordinary operations.
-- `bpm serve` reads the catalog while `bpm ingest` and `bpm scan` write it from another process (overview §4).
-- Edits arrive one at a time from the CLI (`bpm meta set`, `bpm link`). Ingest and scan write in batches of 1,000 files.
+- `bpm serve` reads the catalog while `bpm track` and `bpm scan` write it from another process (overview §4).
+- Edits arrive one at a time from the CLI (`bpm meta set`, `bpm link`). Track and scan write in batches of 1,000 files.
 
 DuckDB was chosen for its analytical speed over millions of rows. Implementing the schema found two problems.
 
@@ -44,7 +44,7 @@ The working-tree draft had already removed every `REFERENCES` clause and moved i
 
 ### 2. DuckDB does not allow a reader process beside a writer process
 
-DuckDB lets one process open a file read-write, or many processes open it read-only, but not both at once. A read-only open from a second process while a writer holds the file fails with `IO Error: Could not set lock on file`. Overview §4 assumed "many readers and one writer". Under DuckDB, `bpm serve` could not run during an ingest or scan, which are long by design.
+DuckDB lets one process open a file read-write, or many processes open it read-only, but not both at once. A read-only open from a second process while a writer holds the file fails with `IO Error: Could not set lock on file`. Overview §4 assumed "many readers and one writer". Under DuckDB, `bpm serve` could not run during a track or scan, which are long by design.
 
 ### The workload is mostly not analytical
 
@@ -84,7 +84,7 @@ Results at 100M file metadata pairs:
 | `files --under` a Project, 50k rows | 74 ms | 206 ms (cold 2.0 s) |
 | `summary` aggregations | 3 to 42 ms | 56 to 771 ms |
 | Unlinked files, possible duplicates | 16 to 24 ms | 312 to 437 ms |
-| Ingest batch of 1,000 files | 5.3 ms | 4.0 ms |
+| Track batch of 1,000 files | 5.3 ms | 4.0 ms |
 | Scan batch of 1,000 | 16 ms | 51 ms |
 | `meta set` on an entity, 1 row per transaction | 8.7 ms | 0.13 ms |
 | `meta set` on a file, 1 row per transaction | 275 ms | 0.78 ms |
@@ -127,7 +127,7 @@ Limits of this benchmark:
 Gains:
 
 - Declared foreign keys on the parent chain and on every `file_id`, with `ON DELETE RESTRICT`.
-- `bpm serve` runs during ingest and scan.
+- `bpm serve` runs during track and scan.
 - Single-row CLI edits are sub-millisecond.
 - The `<catalog>.lock` file and its code go away. The per-run liveness flock stays.
 - Migrations use SQLite's transactional DDL. The table rebuild procedure is documented in the migrations doc.
@@ -165,5 +165,5 @@ Implementation, completed with this ADR:
 
 - **One node table.** Merging the six node tables would make `(node_type, node_id)` on links and metadata a real foreign key. Overview §14, open question 4.
 - **Durability setting.** `synchronous=FULL` is the starting choice. `NORMAL` in WAL mode never corrupts the file, but it can lose the last commits on power loss. Measure the cost on Linux before relaxing it.
-- **`ANALYZE` cadence.** Run `PRAGMA optimize` after large ingests and scans, and confirm the planner keeps choosing the `(key, value)` indexes as metadata grows. Stage 2 runs it at the end of every ingest and scan. Confirming the plans at scale is part of the scenario 31 benchmark.
+- **`ANALYZE` cadence.** Run `PRAGMA optimize` after large tracks and scans, and confirm the planner keeps choosing the `(key, value)` indexes as metadata grows. Stage 2 runs it at the end of every track and scan. Confirming the plans at scale is part of the scenario 31 benchmark.
 - **Backup.** `bpm backup` through the SQLite backup API or `VACUUM INTO`. Overview §14, open question 5.

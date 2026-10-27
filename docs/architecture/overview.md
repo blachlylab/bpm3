@@ -61,12 +61,12 @@ The first code can live in one Cargo package. The boundary that matters is the m
 | --- | --- | --- |
 | `model` | std, serde | clap, axum, rusqlite |
 | `catalog` | `model`, rusqlite behind the trait implementation | clap, axum |
-| `ingest` | `model`, filesystem | clap, axum, SQL strings from the CLI |
+| `track` | `model`, filesystem | clap, axum, SQL strings from the CLI |
 | `query` | `model`, `catalog` trait | clap, axum |
 | `cli` | clap, the traits | axum, rusqlite (it sees the trait, not the engine) |
 | `web` | axum, askama, the traits, vendored assets | clap, rusqlite |
 
-`ingest` implements both `bpm ingest` and `bpm scan`, and v1 calls it from the CLI only. The read-only web UI does not ingest or scan. HTML handlers format the same query structs the CLI prints. They do not grow a second query language. `manifest` and `import` are PRD §4.9 and §4.10, which are unstable, so they are not modules in the settled layout.
+`track` implements both `bpm track` and `bpm scan`, and v1 calls it from the CLI only. The read-only web UI does not track or scan. HTML handlers format the same query structs the CLI prints. They do not grow a second query language. `manifest` and `import` are PRD §4.9 and §4.10, which are unstable, so they are not modules in the settled layout.
 
 The SQLite implementation is the only module that embeds SQL for catalog mutations. Query methods on the trait (`entities_under`, `files_under`, `summary`) are the unstable sketch in §7 and PRD §4.8. `impact` and `lineage` wait for PRD §4.7.
 
@@ -79,7 +79,7 @@ The trait is the reuse seam. Names here are conceptual; Rust signatures can foll
 | Catalog | Open, migrate to latest, catalog id, label, integrity check, repair |
 | Entities | Create, rename, reparent, delete, cascade delete |
 | Metadata | Set, unset, list, on entities and on files |
-| Observations | Apply one ingest batch: new locations, sizes, mtimes, fingerprints. Consult existing rows only for a duplicate |
+| Observations | Apply one track batch: new locations, sizes, mtimes, fingerprints. Consult existing rows only for a duplicate |
 | Digests | `bpm scan` stores BLAKE3 when it reads bytes, or the backend's checksum when that backend supplies one and the body is not downloaded. Acknowledge starts a new generation and clears every current digest for that file |
 | Links | Link, unlink, role. Plan a templated run against a snapshot, apply it in one transaction, undo it by run id. No primary flag |
 | Derivations | **Deferred (PRD §4.7).** Derived-from edges and the walks |
@@ -90,7 +90,7 @@ The trait is the reuse seam. Names here are conceptual; Rust signatures can foll
 
 A `Catalog` value in Core is `LocalSqlite`. The CLI resolves the file by the PRD order: `--catalog`, then the `BPM_CATALOG` environment variable, then `~/.bpm/default.db`. A remote implementation is part of Govern and is **UNSTABLE / TBD** with PRD §5. Its transport is not chosen; see §2.
 
-Errors are typed enough that the CLI and the web UI can share messages: illegal parent, sibling name taken, catalog busy, path outside the ingest root. The UI does not parse English error strings.
+Errors are typed enough that the CLI and the web UI can share messages: illegal parent, sibling name taken, catalog busy, path outside the track root. The UI does not parse English error strings.
 
 ### Remote trait constraints
 
@@ -98,18 +98,18 @@ Errors are typed enough that the CLI and the web UI can share messages: illegal 
 
 A remote client would implement the same groups except SQL, on whichever transport §2 settles. The server rejects a SQL call so an arbitrary statement cannot bypass a future policy filter.
 
-Remote ingest and scan still run against storage the client can see, or against storage the server can see. The first Govern deployment, if it is built, assumes `bpmd` and the data share a filesystem namespace, which matches a core facility or a lab server. Object-store locations are the later Core milestone in PRD §3, and this sketch does not define them. A laptop pushing observations of paths the server cannot read is a later mode: the client would upload the scan batch (paths, sizes, mtimes, fingerprints, digests) and the server would apply it through the same batch operation. The trait's batch operation is what makes that mode possible without a second ingestion path. It is not part of the Core release to expose that batch endpoint publicly.
+Remote track and scan still run against storage the client can see, or against storage the server can see. The first Govern deployment, if it is built, assumes `bpmd` and the data share a filesystem namespace, which matches a core facility or a lab server. Object-store locations are the later Core milestone in PRD §3, and this sketch does not define them. A laptop pushing observations of paths the server cannot read is a later mode: the client would upload the scan batch (paths, sizes, mtimes, fingerprints, digests) and the server would apply it through the same batch operation. The trait's batch operation is what makes that mode possible without a second tracking path. It is not part of the Core release to expose that batch endpoint publicly.
 
 ## 4. Local process model
 
 - One `bpm` process opens one catalog per invocation.
 - `bpm serve` in v1 holds a read-only connection. It does not take the write lock and it cannot mutate the catalog.
-- The catalog runs in SQLite's write-ahead-log mode (`journal_mode=WAL`). Any number of processes can read while one process writes, and each reader sees the last committed state. `bpm serve` keeps reading while `bpm ingest` commits batches in another process.
+- The catalog runs in SQLite's write-ahead-log mode (`journal_mode=WAL`). Any number of processes can read while one process writes, and each reader sees the last committed state. `bpm serve` keeps reading while `bpm track` commits batches in another process.
 - The catalog write lock is SQLite's own. A write transaction starts with `BEGIN IMMEDIATE`, which takes the write lock up front, and holds it only for the duration of that transaction. There is no separate `<catalog>.lock` file. Readers, including `bpm serve`, do not take the write lock. Walking a directory and hashing bytes do not take it.
 - A writer that cannot acquire the lock within a few seconds (`busy_timeout`) exits with "catalog is busy", naming the catalog file. It does not queue silently.
 - Readers keep their transactions short, one per CLI command or per HTTP request. A long-lived read transaction stops the WAL from being checkpointed back into the main file, and the WAL grows until it ends.
 - WAL mode requires every process using the catalog to be on the same host, because readers and the writer coordinate through shared memory (the `-shm` file). The catalog file must live on a local filesystem, not NFS or SMB. The files the catalog describes may live anywhere.
-- Ingest and scan hash a batch of files with the catalog lock released, then take the lock to commit that batch, then release it and hash the next batch. The batch is 1,000 files. That count is internal. A crash keeps every batch already committed. The next run continues.
+- Track and scan hash a batch of files with the catalog lock released, then take the lock to commit that batch, then release it and hash the next batch. The batch is 1,000 files. That count is internal. A crash keeps every batch already committed. The next run continues.
 - A long run's liveness is a separate file, `<catalog>.run-<id>.lock`, held with an exclusive flock for the whole command. It is not the catalog write lock, so other writers proceed between batches. The kernel releases the flock if the process dies. The next open that finds a run still marked `running`, and that can acquire this flock, marks the run `incomplete` and removes the file.
 - Read-write actions from the web UI are Core v2 and are TBD. They are not in v1.
 
@@ -157,8 +157,8 @@ These rules are how the logical schema is written in SQLite. They stay inside th
 - Every table is `STRICT`, so a value of the wrong type is rejected instead of being stored as written. A table whose primary key is not a single integer is also `WITHOUT ROWID`, so the primary key is the table's own B-tree and not a second index.
 - Every connection `bpm` opens sets `foreign_keys=ON`, `busy_timeout`, and, on a writer, `journal_mode=WAL` and `synchronous=FULL`. Whether a new connection enforces foreign keys depends on how SQLite was built. The bundled engine enforces them by default and `bpm` sets the pragma anyway. A third-party SQLite shell often does not enforce them, and can write rows that break a declared key, the same way it can bypass any library check. The integrity check below is how `bpm` notices.
 - `STRICT` needs SQLite 3.37 or later. An older `sqlite3` shell refuses to open the catalog. The bundled engine is far newer.
-- `PRAGMA optimize` runs at the end of every ingest and scan run, so the planner has the statistics it needs to choose the `(key, value)` indexes. A busy catalog skips it and the run still succeeds.
-- V002 adds two indexes the file indexer needs: `files (size_bytes, fingerprint_scheme, fingerprint)`, which ingest probes for every new path before deciding whether to hash it, and `file_digests (algorithm, digest)` for `bpm query files --digest`.
+- `PRAGMA optimize` runs at the end of every track and scan run, so the planner has the statistics it needs to choose the `(key, value)` indexes. A busy catalog skips it and the run still succeeds.
+- V002 adds two indexes the file indexer needs: `files (size_bytes, fingerprint_scheme, fingerprint)`, which track probes for every new path before deciding whether to hash it, and `file_digests (algorithm, digest)` for `bpm query files --digest`.
 
 ### Integrity check and repair
 
@@ -287,7 +287,7 @@ Primary key `(backend, uri)`. A path belongs to one file. When a move is confirm
 | role | Text. Spelled `[a-z0-9_-]+` when `bpm link` writes it |
 | run_id | The `bpm link` run that added the row, or null. Not a foreign key |
 
-Primary key `(file_id, node_type, node_id)`. An index on `(node_type, node_id)` serves "files on this node" and cascade delete. `files` has no node column. Ingest writes `files` and `file_locations` only. Zero link rows is an unlinked file, which is normal after ingest. Two link rows attach one file id to two nodes. The library checks that `node_id` exists on insert. A delete with link rows still present fails. `--cascade` deletes the descendant nodes, their link rows, and their `entity_metadata` rows, and leaves the file rows. No primary-link column. That flag is undefined until the product gives it behavior.
+Primary key `(file_id, node_type, node_id)`. An index on `(node_type, node_id)` serves "files on this node" and cascade delete. `files` has no node column. Track writes `files` and `file_locations` only. Zero link rows is an unlinked file, which is normal after track. Two link rows attach one file id to two nodes. The library checks that `node_id` exists on insert. A delete with link rows still present fails. `--cascade` deletes the descendant nodes, their link rows, and their `entity_metadata` rows, and leaves the file rows. No primary-link column. That flag is undefined until the product gives it behavior.
 
 ### link_runs, link_role_changes, link_roles
 
@@ -306,11 +306,11 @@ A link run plans against a read transaction, prints the plan, and then plans aga
 
 Cycles are rejected in the library when an edge is recorded, by walking ancestors of the input. The walk is bounded by the edge count of the two files' connected component.
 
-### ingest_runs and scan_runs
+### track_runs and scan_runs
 
-Ingest and scan are different commands, so their run logs are different tables with the same columns: id, backend (empty when a scan covers every backend), root_uri (empty when a scan has no path), started_at, finished_at, status (`running`, `complete`, `incomplete`), files_seen, files_created (ingest only). Errors are rows of run id, uri, and message. A path that cannot be read is an error row. It does not make the run `incomplete`. The command reports it on stderr and exits non-zero after committing everything else.
+Track and scan are different commands, so their run logs are different tables with the same columns: id, backend (empty when a scan covers every backend), root_uri (empty when a scan has no path), started_at, finished_at, status (`running`, `complete`, `incomplete`), files_seen, files_created (track only). Errors are rows of run id, uri, and message. A path that cannot be read is an error row. It does not make the run `incomplete`. The command reports it on stderr and exits non-zero after committing everything else. Schema version 4 renamed `ingest_runs` and `ingest_errors` to `track_runs` and `track_errors` when `bpm ingest` became `bpm track`.
 
-A run left `running` by a crash is `incomplete` the next time a process opens the catalog and can take that run's liveness flock. The catalog lock is not the signal, because it is released between batches of a live run. Running the command again is the recovery. Individual file batches are already committed. Ingest does not mark missing paths. Scan does.
+A run left `running` by a crash is `incomplete` the next time a process opens the catalog and can take that run's liveness flock. The catalog lock is not the signal, because it is released between batches of a live run. Running the command again is the recovery. Individual file batches are already committed. Track does not mark missing paths. Scan does.
 
 ### manifests
 
@@ -349,19 +349,19 @@ Append-only through the library. No update method is exposed.
 
 Possible duplicates (same size, same fingerprint scheme and value, different file id, no shared current digest of the same algorithm) are a query over `files` and `file_digests`. Drift filters are a query over `file_locations`, using the operator states in §6. Descendant sets are a join along the node-table parent keys, not a stored closure. A Govern release would compute effective policy from the tree at decision time and copy it into the release record. That step is PRD §5, which is unstable. Core does not compute it.
 
-## 6. Ingest, scan, fingerprint, and digest
+## 6. Track, scan, fingerprint, and digest
 
 ### Fingerprint
 
 The fingerprint is a fast candidate filter. It is not part of the file id, and a catalog remains valid if the scheme changes or a row has none.
 
-Ingest, scan, and acknowledge write one scheme:
+Track, scan, and acknowledge write one scheme:
 
 | Scheme name | Bytes hashed |
 | --- | --- |
 | `xxh3-128-head-256k` | The first 256 KiB, or the whole file when it is shorter. The size is compared beside it and is not hashed. |
 
-Ingest reads at most 256 KiB of a new path, on eight threads per batch. Scan takes the same window from the full read it already makes. Two different files with the same size and the same first 256 KiB cost two full reads to tell apart; they are never merged.
+Track reads at most 256 KiB of a new path, on eight threads per batch. Scan takes the same window from the full read it already makes. Two different files with the same size and the same first 256 KiB cost two full reads to tell apart; they are never merged.
 
 Earlier builds wrote two schemes, which rows may still carry:
 
@@ -370,7 +370,7 @@ Earlier builds wrote two schemes, which rows may still carry:
 | ≤ 64 MiB | `xxh3-128-full` | The entire file |
 | > 64 MiB | `xxh3-128-sample-v1` | A length-prefixed sample: the file size as an 8-byte little-endian integer, then the first 1 MiB, 1 MiB centered on the midpoint, and the last 1 MiB. Short reads at the ends use the bytes that exist. |
 
-When a new path has the size of a row that carries an earlier scheme, ingest also computes the new path's fingerprint in that scheme and compares it, so a copy of a file ingested before the change is still found. Only sizes that match pay that read.
+When a new path has the size of a row that carries an earlier scheme, track also computes the new path's fingerprint in that scheme and compares it, so a copy of a file tracked before the change is still found. Only sizes that match pay that read.
 
 XXH3-128 is the first hash, not a permanent choice. The scheme name is stored on the row that carries that fingerprint. Two fingerprints are compared only when those strings are equal. A different scheme, or a null fingerprint, is not evidence that the bytes differ. Confirmation is a digest comparison. Fingerprint equality never merges file ids.
 
@@ -378,29 +378,29 @@ The 256 KiB window belongs to `xxh3-128-head-256k`, and the 64 MiB cutoff and th
 
 1. New rows get the new scheme.
 2. Scan, which reads every byte anyway, writes the new scheme on a row whose stored scheme is older, but only when the BLAKE3 of that read matches the row's current digest. A fingerprint never describes bytes other than the current digest's.
-3. Until a row is upgraded, ingest compares a new path of the same size with it in the row's scheme. An earlier scheme stays computable, and pinned by its test, for as long as rows may carry it.
+3. Until a row is upgraded, track compares a new path of the same size with it in the row's scheme. An earlier scheme stays computable, and pinned by its test, for as long as rows may carry it.
 
 ### Full digest
 
 The digest BPM computes by reading bytes is BLAKE3, algorithm `blake3`, wire form `blake3:<hex>`. Digests are stored as lowercase hex. Comparison is case-insensitive on input and lowercase on output.
 
-On a posix location, `bpm scan` streams each selected location once through BLAKE3. Ingest reads a whole file only to test a duplicate: same size, same fingerprint scheme, and same fingerprint as a file already in the catalog. It hashes the new path and, when the existing file has no BLAKE3, that file's current bytes too. Matching BLAKE3 values add a location.
+On a posix location, `bpm scan` streams each selected location once through BLAKE3. Track reads a whole file only to test a duplicate: same size, same fingerprint scheme, and same fingerprint as a file already in the catalog. It hashes the new path and, when the existing file has no BLAKE3, that file's current bytes too. Matching BLAKE3 values add a location.
 
-`bpm scan --md5` is a second pass that stores algorithm `md5`. Without the flag, scan does not compute MD5. Ingest does not compute it.
+`bpm scan --md5` is a second pass that stores algorithm `md5`. Without the flag, scan does not compute MD5. Track does not compute it.
 
 ### Backend checksums
 
-Some backends charge for a body download and also publish a checksum. S3 is the case this rule is written for. It stores one of ten checksums with the object. The ten include SHA-256 and XXH3. Ingest and scan trust the checksums the backend returns and do not download the body.
+Some backends charge for a body download and also publish a checksum. S3 is the case this rule is written for. It stores one of ten checksums with the object. The ten include SHA-256 and XXH3. Track and scan trust the checksums the backend returns and do not download the body.
 
 Each returned checksum is a `file_digests` row with `source = backend` and the provider's algorithm name. Size comes from the listing or from HEAD. A matching size and a matching current digest of the same algorithm add a location, with no download. If the backend returns no checksum, the object becomes a new file id. The same size as an existing file, with no comparable digest, is a possible duplicate and is not merged.
 
-Downloading the body is an explicit flag on `bpm ingest` and on `bpm scan`. The spelling is TBD. With the flag, BPM streams the body, stores BLAKE3 with `source = computed`, and on ingest of a new object also stores a fingerprint. A posix location has no provider checksum, so those commands read bytes without that flag.
+Downloading the body is an explicit flag on `bpm track` and on `bpm scan`. The spelling is TBD. With the flag, BPM streams the body, stores BLAKE3 with `source = computed`, and on track of a new object also stores a fingerprint. A posix location has no provider checksum, so those commands read bytes without that flag.
 
 Drift against a trusted checksum compares what the backend returns now with the stored digest of that algorithm. A locally computed BLAKE3 is compared on its own row. `digest_mismatch` is set when any algorithm compared on that scan disagrees. `ok` requires every algorithm compared on that scan to match, or records the digest the first time one is stored.
 
 ### Path filters
 
-The blacklist and the whitelist apply to the ingest walk and to which existing locations a scan checks. They do not delete a catalog row that a later filter would have skipped.
+The blacklist and the whitelist apply to the track walk and to which existing locations a scan checks. They do not delete a catalog row that a later filter would have skipped.
 
 The built-in blacklist is the file names `.DS_Store` and `Thumbs.db`. It always applies, unless this run passes `--no-default-blacklist`.
 
@@ -417,24 +417,24 @@ whitelist = ["*.fq.gz", "*.bam"]
 
 The file is read when a run still takes at least one of the two lists from it. When both flags are set, the file is not read. A missing file, or a missing key, is an empty list. A file that is not valid TOML, or a `blacklist` or `whitelist` that is not an array of strings, is an error.
 
-With no whitelist in effect, every path that survives the blacklist is eligible. With one or more patterns, a path must match at least one and must not be denied. `*` does not cross `/`. `**` does. On ingest the pattern is matched against the path relative to the walk root. On scan it is matched against the location path relative to the scan root, or against the full URI when the scan covers a whole backend.
+With no whitelist in effect, every path that survives the blacklist is eligible. With one or more patterns, a path must match at least one and must not be denied. `*` does not cross `/`. `**` does. On track the pattern is matched against the path relative to the walk root. On scan it is matched against the location path relative to the scan root, or against the full URI when the scan covers a whole backend.
 
-### Ingest walk
+### Track walk
 
 1. Resolve the pathspec to a canonical directory. Refuse to start if it is not a directory.
-2. Walk depth-first. Skip directory symlinks whose canonical target is outside the root, and record them as ingest errors of class `outside_root` (reported, not fatal). Skip symlink cycles.
+2. Walk depth-first. Skip directory symlinks whose canonical target is outside the root, and record them as track errors of class `outside_root` (reported, not fatal). Skip symlink cycles.
 3. Follow a symlink to a regular file. The walked path and the canonical path are two location candidates when they differ. A directory, whether reached directly or through a link, is walked by its canonical path, so every file under it is recorded under the path later commands resolve to. A symlink whose target cannot be resolved is counted on stderr and the run still succeeds. The target may have been a file or a directory, and the walk cannot tell which, so the count stands in for the paths.
 4. Apply the blacklist and the whitelist. Each candidate is matched by its own path: relative to the root, or by its final name when a link target is outside the root. A link is skipped when its target is denied, even if the link's own name is allowed.
 5. Skip any path whose `(backend, uri)` is already a location. Do not stat it for drift and do not hash it.
 6. For each new regular file on a posix backend, record size, mtime, and fingerprint. If size, scheme, and fingerprint match an existing file, run the duplicate consultation above. On a checksum-bearing object backend, record size and the backend checksums, and skip the body unless the download flag is set.
 7. A path that cannot be read, when a read was required, is an error and receives no fingerprint. It still gets a file row and a location, with the size and mtime stat returned, so a later scan can read it once it is readable. A path that cannot be stat'ed gets no row.
-8. Write the ingest row as `complete`, or `incomplete` if any batch failed.
+8. Write the track row as `complete`, or `incomplete` if any batch failed.
 
-Ingest does not mark absent paths `missing`. That is scan.
+Track does not mark absent paths `missing`. That is scan.
 
 Directory walk parallelism is an implementation choice. Batches of 1,000 files stay the commit boundary. The first implementation is single-threaded and walks each directory in name order.
 
-Within one batch, two new paths with the same size and fingerprint are compared by BLAKE3 the same way, so copies ingested together become one file id. The summary counts them as `copies` and does not list the paths. Before the walk, stderr names the directory and any whitelist or blacklist in effect. A terminal rewrites one stderr line every 10 files, with a carriage return and a clear-to-end-of-line. A pipe gets a new line each time. The summary stays one line on stdout. `new files` plus `copies` is `new locations`. A path that was already a location is counted as `already recorded` and is not hashed again. A new file whose BLAKE3 was computed is checked again under the write lock. If another ingest committed those bytes while this batch was hashed, the path becomes a location of that file. If the read that would confirm a fingerprint match fails, ingest reports a possible duplicate and stores the path with no fingerprint, as for any path it could not read. An existing file with no BLAKE3 is hashed only from a present location whose size and mtime still match what the catalog recorded. Bytes that changed since then are not the file the catalog describes, so such a candidate counts as one that cannot be hashed and is reported as a possible duplicate.
+Within one batch, two new paths with the same size and fingerprint are compared by BLAKE3 the same way, so copies tracked together become one file id. The summary counts them as `copies` and does not list the paths. Before the walk, stderr names the directory and any whitelist or blacklist in effect. A terminal rewrites one stderr line every 10 files, with a carriage return and a clear-to-end-of-line. A pipe gets a new line each time. The summary stays one line on stdout. `new files` plus `copies` is `new locations`. A path that was already a location is counted as `already recorded` and is not hashed again. A new file whose BLAKE3 was computed is checked again under the write lock. If another track committed those bytes while this batch was hashed, the path becomes a location of that file. If the read that would confirm a fingerprint match fails, track reports a possible duplicate and stores the path with no fingerprint, as for any path it could not read. An existing file with no BLAKE3 is hashed only from a present location whose size and mtime still match what the catalog recorded. Bytes that changed since then are not the file the catalog describes, so such a candidate counts as one that cannot be hashed and is reported as a possible duplicate.
 
 ### Scan
 
@@ -450,9 +450,9 @@ A scan argument that is a backend name (`posix`, `s3`) selects that backend. Any
 
 The `s3` row is the selection rule for the later object-store milestone. The first milestone records only `posix` locations, so that invocation selects nothing until the backend exists. A path with no backend is the local filesystem in every milestone.
 
-A missing URI sets `presence` to `missing`. A size or mtime change sets `stat_state` to `changed`, and `last_size` and `last_mtime` record the new observation. `changed` is sticky: a later scan that sees the same new stat does not clear it. Only acknowledge returns the location to `unchanged`, so the evidence of a change outlives the scan that found it. When the stat changed, or the file has no fingerprint yet, the fingerprint is recomputed from the same read. It is written to `files`, with the new size and mtime, only when those bytes hold the current BLAKE3. The size, mtime, and fingerprint on `files` describe the bytes of the current digest, and ingest matches duplicates on them. A copy that drifted must not move them away from its unchanged siblings. Acknowledge is what moves drifted bytes onto `files`. The digest comparison is independent, per algorithm, as in the backend-checksum rule above. Operator filters read these columns, so one location can be both `stat_changed` and `digest_mismatch`.
+A missing URI sets `presence` to `missing`. A size or mtime change sets `stat_state` to `changed`, and `last_size` and `last_mtime` record the new observation. `changed` is sticky: a later scan that sees the same new stat does not clear it. Only acknowledge returns the location to `unchanged`, so the evidence of a change outlives the scan that found it. When the stat changed, or the file has no fingerprint yet, the fingerprint is recomputed from the same read. It is written to `files`, with the new size and mtime, only when those bytes hold the current BLAKE3. The size, mtime, and fingerprint on `files` describe the bytes of the current digest, and track matches duplicates on them. A copy that drifted must not move them away from its unchanged siblings. Acknowledge is what moves drifted bytes onto `files`. The digest comparison is independent, per algorithm, as in the backend-checksum rule above. Operator filters read these columns, so one location can be both `stat_changed` and `digest_mismatch`.
 
-The first scan that reads a file records its BLAKE3, even when the stat changed since ingest. The location then shows both `stat_changed` and the recorded digest, and any later change to the bytes is `digest_mismatch`. Within one batch, locations whose stat did not change are applied first, so when a file has an unchanged copy, that copy supplies the first digest. An MD5 from `--md5` is recorded only beside a BLAKE3 that matched or was just recorded, in the same generation. A present location whose stat is unchanged but whose bytes have not been hashed is none of the four operator states. Query output shows it as `unverified`, and `--drift unverified` selects it.
+The first scan that reads a file records its BLAKE3, even when the stat changed since track. The location then shows both `stat_changed` and the recorded digest, and any later change to the bytes is `digest_mismatch`. Within one batch, locations whose stat did not change are applied first, so when a file has an unchanged copy, that copy supplies the first digest. An MD5 from `--md5` is recorded only beside a BLAKE3 that matched or was just recorded, in the same generation. A present location whose stat is unchanged but whose bytes have not been hashed is none of the four operator states. Query output shows it as `unverified`, and `--drift unverified` selects it.
 
 | Operator state | Columns |
 | --- | --- |
@@ -461,7 +461,7 @@ The first scan that reads a file records its BLAKE3, even when the stat changed 
 | `digest_mismatch` | `digest_state = mismatch` |
 | `ok` | present, `stat_state = unchanged`, and `digest_state = match` |
 
-Scan does not merge file ids. Merging a duplicate path onto an existing file id happens during ingest.
+Scan does not merge file ids. Merging a duplicate path onto an existing file id happens during track.
 
 ### Acknowledge
 
@@ -559,7 +559,7 @@ Every response carries `Content-Security-Policy: default-src 'self'; form-action
 
 The home page is `bpm query summary`. It does a few whole-table reads and takes about 1.7 s on the scenario 31 catalog of 1,000,000 files. Caching the summary between catalog changes is a later option. Every other page takes under 0.4 s there.
 
-Core v2 is the read-write UI. Its routes and behavior are TBD. v1 does not register POST handlers that mutate the catalog, including metadata edits, acknowledge, ingest, scan, and manifest build. The login form may POST the token. That request does not write the catalog.
+Core v2 is the read-write UI. Its routes and behavior are TBD. v1 does not register POST handlers that mutate the catalog, including metadata edits, acknowledge, track, scan, and manifest build. The login form may POST the token. That request does not write the catalog.
 
 The first draft's only asset is `assets/app.css`, a small hand-written stylesheet with no build step. The binary embeds it with `include_str!`. Third-party front-end files, when they are added, are committed under `assets/vendor/` and embedded the same way, and a build does not download them: the HTMX runtime, and a compiled Tailwind and DaisyUI stylesheet if the UI adopts one. Templates are Askama, under `templates/`, and compiled into the binary. They escape every value, and display formatting (sizes, counts, labels) happens in the handlers, not in the templates.
 
@@ -569,7 +569,7 @@ A startup log line states the bind address. It does not state the token.
 
 Clap 4 derive parser. The binary name is `bpm`. The subcommands Core implements are the rows in PRD §4.13 whose Unstable cell is empty. `--catalog` is a global argument. `--format` applies to commands that print rows. On `bpm query` the flag set is still the §4.8 sketch.
 
-Output goes to stdout. Diagnostics go to stderr. Exit status is `0` on success and non-zero on a rejected command. `bpm ingest` and `bpm scan` also exit non-zero when any path could not be read. The paths they could read are committed first.
+Output goes to stdout. Diagnostics go to stderr. Exit status is `0` on success and non-zero on a rejected command. `bpm track` and `bpm scan` also exit non-zero when any path could not be read. The paths they could read are committed first.
 
 `bpm delete` takes an entity, `--location PATH`, or `--file FILE`. A file is named by its id or by one of its location paths. `--file` refuses a file with links unless `--cascade` removes them too. None of these touch bytes on disk. `bpm link --to TEMPLATE --role ROLE FILE…` and `bpm unlink --to TEMPLATE FILE…` name a file the same way, and also take a directory, which reaches every catalog location below it. The template grammar is [ADR 0002](../adr/0002-link-templates.md).
 
@@ -631,7 +631,7 @@ This is the sketch if the transport is HTTP. Section 2 does not choose that. gRP
 | `GET /api/catalogs` | list catalogs the caller may see |
 | `POST /api/entities` | create |
 | `PATCH /api/entities/{id}` | rename, reparent, metadata |
-| `POST /api/ingests` | apply an ingest batch of new locations |
+| `POST /api/tracks` | apply a track batch of new locations |
 | `POST /api/scans` | apply digest and drift observations for locations already in the catalog |
 | `POST /api/files/{id}/digests` | store a digest |
 | `POST /api/links` | link |
@@ -654,7 +654,7 @@ Tests:
 | --- | --- |
 | Model unit tests | Program and Project names, parent foreign keys, path formatting, rejection of `:` and `/` in metadata keys and values, rejection of a link or metadata row whose `(node_type, node_id)` is missing |
 | Catalog integration tests | The PRD §4.15 scenarios that are not marked deferred or unstable, each against a temporary SQLite file |
-| Ingest and scan fixtures | Directories of small files, a symlink, an unreadable file, a simulated move, a second path with the same bytes |
+| Track and scan fixtures | Directories of small files, a symlink, an unreadable file, a simulated move, a second path with the same bytes |
 | Later milestones | Canonical manifest JSON and `--refresh-snapshot` when PRD §4.10 is finalized. Cycle rejection on derived-from edges when PRD §4.7 is built |
 | Policy unit tests | Govern acceptance items 4–7, on the pure function, when that module exists. PRD §5 is unstable, so these are not Core tests |
 | Benchmark | Synthetic 1,000,000-file catalog, timed queries from PRD scenario 31: `cargo bench --bench scenario31`. Not part of the default `cargo test` run. Results are in [Scenario 31 benchmark](../benchmarks/scenario31.md). The engine comparison that chose SQLite is a separate harness in `benches/engine_comparison` |
@@ -687,11 +687,11 @@ In the Govern sketch, audit can stay an append-only table in whichever engine ho
 | Store | Embedded SQLite in WAL mode, one file per catalog, on a local filesystem. A side operations database is the Govern sketch, not a Core dependency. See [ADR 0001](../adr/0001-sqlite-catalog-store.md). |
 | Seam | A catalog trait of semantic operations. The remote transport is not chosen: HTTP, or gRPC or similar (§2). SQL is local-only, and `--write` does not record history until PRD §4.7. |
 | Nodes | Six tables. Each parent column is a foreign key to the table one step up, `ON DELETE RESTRICT`. `name` is a column on `programs` and `projects` only. Descendant queries join those parent keys. No closure table. |
-| Attachments | One `files` table, with no node column. `file_links` and `entity_metadata` use `(node_type, node_id)`. That pair is not a foreign key. The library checks it. Ingest does not write links. |
+| Attachments | One `files` table, with no node column. `file_links` and `entity_metadata` use `(node_type, node_id)`. That pair is not a foreign key. The library checks it. Track does not write links. |
 | Digests | Rows in `file_digests`, one current row per algorithm, generation column is the history. Acknowledge clears every current digest for the file together. |
 | Fingerprint | First scheme is XXH3-128, named on the row. Nullable. A new scheme does not rewrite existing rows or change file ids. Compared only when the scheme strings match. |
 | Full digest | BLAKE3 when BPM reads bytes. `bpm scan --md5` stores MD5 as a second pass. A backend that publishes checksums is trusted. The flag that forces a download is deferred until the object-store stage. |
-| Ingest commit | Batches of 1,000 files. The catalog lock is held only while a batch is committed. Hashing happens with the lock released. A per-run flock records that a long run is still alive. |
+| Track commit | Batches of 1,000 files. The catalog lock is held only while a batch is committed. Hashing happens with the lock released. A per-run flock records that a long run is still alive. |
 | Manifest mutation | **Unstable (PRD §4.10).** Sketch: content body immutable. Snapshot may be refreshed in place. |
 | UI | Server-rendered Askama. HTMX, compiled DaisyUI CSS, and any other JS or CSS are vendored under `assets/vendor/` and embedded. Default `127.0.0.1:3000`. v1 is read-only. A non-default host requires a token. |
 | Authz source of truth | **Unstable (PRD §5).** Sketch: BPM role bindings. OIDC proves identity. No IdP group mapping in the first cut. |
@@ -703,7 +703,7 @@ In the Govern sketch, audit can stay an append-only table in whichever engine ho
 
 1. **Hash-chained audit.** Append-only plus file permissions is the current bar. A hash chain is easy to add later and harder to retrofit into an export an auditor already has. Decide before the first production Govern deployment, not before Core.
 2. **Scan from a laptop against a server that cannot see those paths.** The batch operation on the trait allows it. The first Govern deployment does not expose it. Confirm that the first server really shares a filesystem with the data.
-3. **Background ingest and scan in `bpm serve`.** Not part of the read-only v1 UI. If Core v2 starts those operations from the browser, the scheduling design (thread in-process versus a subprocess) is still open.
+3. **Background track and scan in `bpm serve`.** Not part of the read-only v1 UI. If Core v2 starts those operations from the browser, the scheduling design (thread in-process versus a subprocess) is still open.
 4. **One node table.** Merging the six node tables into one `nodes` table, keyed by the UUID with a `node_type` column, would make `(node_type, node_id)` on links and metadata an ordinary foreign key to `nodes.id`. The parent-type rule would then be a library check, or a trigger, rather than a foreign key. ADR 0001 lists this as a follow-up. It is not needed for the move to SQLite.
 5. **Catalog backup.** A copy of the catalog file taken while a writer is active may miss committed rows that are still in the `-wal` file. Copying while no `bpm` process has the catalog open is safe. A `bpm backup` command using SQLite's online backup API or `VACUUM INTO` would remove that caveat. It is not in Core yet.
-6. **Object-store download flag.** Ingest and scan trust a published checksum and download the body only when asked. The spelling of that flag is deferred until the object-store stage starts.
+6. **Object-store download flag.** Track and scan trust a published checksum and download the body only when asked. The spelling of that flag is deferred until the object-store stage starts.

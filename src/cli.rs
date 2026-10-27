@@ -8,12 +8,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::catalog::{self, AckOutcome, Catalog, EntityQuery, FileQuery, LinkOptions, SqlOutcome};
 use crate::error::Error;
-use crate::ingest::filter::{self, FilterSpec, PathFilter};
-use crate::ingest::{self, AckReport, ScanArg};
 use crate::link::{Expect, MatchOn, Renderer, Table, Template};
 use crate::model::{Drift, FileRef, NodeType, POSIX};
 use crate::perms;
 use crate::query::{self, RenderFormat};
+use crate::track::filter::{self, FilterSpec, PathFilter};
+use crate::track::{self, AckReport, ScanArg};
 
 #[derive(Parser)]
 #[command(
@@ -75,7 +75,7 @@ enum Command {
         cascade: bool,
     },
     /// Add the files under a directory that are not already in the catalog.
-    Ingest {
+    Track {
         path: PathBuf,
         #[command(flatten)]
         filters: FilterArgs,
@@ -473,17 +473,17 @@ fn dispatch() -> Result<(), Error> {
         } => {
             let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
             if let Some(location) = location {
-                catalog.delete_location(POSIX, &ingest::location_uri(&location)?)?;
+                catalog.delete_location(POSIX, &track::location_uri(&location)?)?;
             } else if let Some(file) = file {
-                catalog.delete_file(&ingest::file_ref(&file)?, cascade)?;
+                catalog.delete_file(&track::file_ref(&file)?, cascade)?;
             } else if let Some(target) = target {
                 catalog.delete(&target, cascade)?;
             }
         }
-        Command::Ingest { path, filters } => {
+        Command::Track { path, filters } => {
             let filter = filters.build()?;
             let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
-            let report = ingest::ingest(&mut catalog, &path, &filter)?;
+            let report = track::track(&mut catalog, &path, &filter)?;
             if report.broken_links > 0 {
                 let noun = if report.broken_links == 1 {
                     "broken symbolic link"
@@ -502,7 +502,7 @@ fn dispatch() -> Result<(), Error> {
                 );
             }
             println!(
-                "ingest {}: {} files seen, {} new files, {} new locations, {} copies, {} already recorded, {} errors",
+                "track {}: {} files seen, {} new files, {} new locations, {} copies, {} already recorded, {} errors",
                 report.run_id.map(|id| id.to_string()).unwrap_or_default(),
                 report.seen,
                 report.created,
@@ -522,7 +522,7 @@ fn dispatch() -> Result<(), Error> {
         } => {
             let filter = filters.build()?;
             let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
-            let report = ingest::scan(
+            let report = track::scan(
                 &mut catalog,
                 &ScanArg::parse(target.as_deref()),
                 &filter,
@@ -562,9 +562,9 @@ fn dispatch() -> Result<(), Error> {
             }
         }
         Command::Acknowledge { file, md5 } => {
-            let file = ingest::file_ref(&file)?;
+            let file = track::file_ref(&file)?;
             let mut catalog = open_write_unchecked(cli.catalog.as_deref())?;
-            match ingest::acknowledge(&mut catalog, &file, md5)? {
+            match track::acknowledge(&mut catalog, &file, md5)? {
                 AckReport::NothingToDo(row) => {
                     println!("file {}: no drift; nothing to acknowledge", row.id);
                 }
@@ -1065,7 +1065,7 @@ fn link_operand(raw: &str) -> Result<FileRef, Error> {
             ))),
         };
     }
-    ingest::file_ref(raw)
+    track::file_ref(raw)
 }
 
 /// Ask on a terminal. Without one, a run that needs an answer fails.

@@ -28,7 +28,7 @@ Data on disk is never at risk. `bpm` never deletes file bytes, and `bpm repair` 
 
 ## Emergency checklist
 
-1. **Stop writers.** Let any `bpm ingest` or `bpm scan` finish or stop it. Close any other tool that has the file open for writing. `bpm serve` can keep running, because it only reads.
+1. **Stop writers.** Let any `bpm track` or `bpm scan` finish or stop it. Close any other tool that has the file open for writing. `bpm serve` can keep running, because it only reads.
 
 2. **Take a backup.** Writing it does not need the write lock:
 
@@ -71,7 +71,7 @@ Each problem names a table, a count, and what is missing, then lists up to 20 ro
 | `file_metadata` | file is missing | `file_id key` |
 | `file_digests` | file is missing | `file_id algorithm generation` |
 | `file_locations` | file is missing | `backend:uri` |
-| `ingest_errors`, `scan_errors` | run is missing | `run_id uri` |
+| `track_errors`, `scan_errors` | run is missing | `run_id uri` |
 
 The orphan entities in the first five tables are what stop other commands, so fix those first.
 
@@ -156,7 +156,7 @@ It commits only if the catalog checks clean afterwards. Otherwise nothing change
 These do not stop other commands, but `bpm repair` reports them.
 
 - **Metadata or a link on a missing entity:** nothing can use these rows. If the entity was deleted by mistake, use fix A, with the UUID from the key. The rows reattach to it.
-- **Metadata, digests, links, or locations on a missing file:** the file row is gone and `bpm` cannot recreate it with the same id. Remove these rows with `bpm repair --apply`. The bytes are still on disk. Ingesting their path again gives them a new file id.
+- **Metadata, digests, links, or locations on a missing file:** the file row is gone and `bpm` cannot recreate it with the same id. Remove these rows with `bpm repair --apply`. The bytes are still on disk. Tracking their path again gives them a new file id.
 - **Error rows on a missing run:** history only. Remove them.
 
 ## After a repair

@@ -7,7 +7,7 @@
 //!
 //! The catalog is created by `Catalog::init`, so it carries every real
 //! migration. Rows are then bulk-loaded with plain inserts into that schema,
-//! because a million files cannot go through `bpm ingest` without a million
+//! because a million files cannot go through `bpm track` without a million
 //! files on disk. Each timed query opens the catalog read-only, runs the tree
 //! check, runs the query, and renders the table, as the CLI does. Nothing here
 //! fails on a threshold; the PRD target is a few seconds on one workstation.

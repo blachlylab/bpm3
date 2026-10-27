@@ -104,8 +104,8 @@ impl Env {
             .unwrap()
     }
 
-    fn ingest(&self, path: &Path) -> Run {
-        ok(self.bpm(&["ingest", path.to_str().unwrap()]))
+    fn track(&self, path: &Path) -> Run {
+        ok(self.bpm(&["track", path.to_str().unwrap()]))
     }
 
     fn scan(&self, path: &Path) -> Run {
@@ -208,7 +208,7 @@ fn strings(value: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The columns ingest must leave alone, for one file.
+/// The columns track must leave alone, for one file.
 fn snapshot(env: &Env) -> String {
     env.sql(
         "SELECT f.id, f.size_bytes, f.mtime, f.fingerprint, f.fingerprint_scheme,
@@ -225,7 +225,7 @@ fn query_files_count_respects_the_filters_and_the_format() {
     write(&dir.join("a.fq"), b"aaa\n");
     write(&dir.join("b.fq"), b"bbb\n");
     write(&dir.join("c.fq"), b"ccc\n");
-    env.ingest(&dir);
+    env.track(&dir);
 
     let table = ok(env.bpm(&["query", "files", "--count"]));
     assert_eq!(table.out, "count\n3\n");
@@ -277,7 +277,7 @@ fn query_files_table_is_compact_until_full() {
     let env = Env::new("compact");
     let path = env.data().join("run").join("a.fq");
     write(&path, b"aaa\n");
-    env.ingest(path.parent().unwrap());
+    env.track(path.parent().unwrap());
 
     let id = env.id_at(&path);
     let tail = id.rsplit_once('-').unwrap().1;
@@ -320,14 +320,14 @@ fn query_files_table_is_compact_until_full() {
 }
 
 #[test]
-fn scenario_10_ingest_creates_unlinked_rows_without_payload() {
+fn scenario_10_track_creates_unlinked_rows_without_payload() {
     let env = Env::new("s10");
     let run42 = env.data().join("run42");
     let marker = b"PAYLOAD-7d1c0e2a-must-not-reach-the-catalog\n";
     write(&run42.join("S1_R1.fq.gz"), marker);
     write(&run42.join("lane1/S1_R2.fq.gz"), b"ACGTACGT\n");
 
-    let run = env.ingest(&run42);
+    let run = env.track(&run42);
     assert!(run.out.contains("2 new files"), "{}", run.out);
     let files = env.files(&[]);
     assert_eq!(files.len(), 2);
@@ -339,7 +339,7 @@ fn scenario_10_ingest_creates_unlinked_rows_without_payload() {
         assert_eq!(file["fingerprint"]["hex"].as_str().unwrap().len(), 32);
         assert_eq!(file["locations"].as_array().unwrap().len(), 1);
         assert_eq!(file["locations"][0]["backend"], "posix");
-        // Ingest does not hash a file that has no possible duplicate.
+        // Track does not hash a file that has no possible duplicate.
         assert!(file["digests"].as_array().unwrap().is_empty());
         assert_eq!(strings(&file["drift"]), ["unverified"]);
     }
@@ -358,38 +358,38 @@ fn scenario_10_ingest_creates_unlinked_rows_without_payload() {
         }
     }
     assert_eq!(
-        env.scalar("SELECT status || ' ' || files_seen || ' ' || files_created FROM ingest_runs"),
+        env.scalar("SELECT status || ' ' || files_seen || ' ' || files_created FROM track_runs"),
         "complete 2 2"
     );
 }
 
 #[test]
-fn scenario_11_second_ingest_changes_nothing() {
+fn scenario_11_second_track_changes_nothing() {
     let env = Env::new("s11");
     let run42 = env.data().join("run42");
     write(&run42.join("a.fq"), b"aaaa\n");
     write(&run42.join("b.fq"), b"bbbbbb\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.scan(&run42);
     let before = snapshot(&env);
-    let run = env.ingest(&run42);
+    let run = env.track(&run42);
     assert!(run.out.contains("0 new files"), "{}", run.out);
     assert_eq!(snapshot(&env), before);
     assert_eq!(env.count("files"), 2);
-    assert_eq!(env.count("ingest_runs"), 2);
+    assert_eq!(env.count("track_runs"), 2);
 }
 
 #[test]
-fn scenario_12_ingest_ignores_existing_drift() {
+fn scenario_12_track_ignores_existing_drift() {
     let env = Env::new("s12");
     let run42 = env.data().join("run42");
     let fq = run42.join("S1_R1.fq.gz");
     write(&fq, b"original bytes\n");
-    env.ingest(&run42);
+    env.track(&run42);
     let before = snapshot(&env);
 
     write(&fq, b"original bytes, and more appended overnight\n");
-    env.ingest(&run42);
+    env.track(&run42);
     assert_eq!(snapshot(&env), before);
     assert_eq!(env.count("files"), 1);
 
@@ -404,7 +404,7 @@ fn scenario_13_duplicate_after_scan_joins_the_existing_file() {
     let archive = env.data().join("archive");
     write(&run42.join("S1_R1.fq.gz"), b"same bytes\n");
     write(&archive.join("S1_R1.fq.gz"), b"same bytes\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.scan(&run42);
     let id = env.id_at(&run42.join("S1_R1.fq.gz"));
 
@@ -412,7 +412,7 @@ fn scenario_13_duplicate_after_scan_joins_the_existing_file() {
     env.create(&["program", "--name", "CLL"]);
     ok(env.bpm(&["link", "--yes", "--to", "/CLL", &id, "--role", "data"]));
 
-    let run = env.ingest(&archive);
+    let run = env.track(&archive);
     assert!(
         run.out.contains("0 new files, 1 new locations"),
         "{}",
@@ -424,15 +424,13 @@ fn scenario_13_duplicate_after_scan_joins_the_existing_file() {
 }
 
 #[test]
-fn ingest_logs_its_start_and_counts_every_ten_files() {
+fn track_logs_its_start_and_counts_every_ten_files() {
     let env = Env::new("progress");
     let one = env.data().join("one");
     write(&one.join("notes.txt"), b"notes\n");
-    let quiet = env.ingest(&one);
+    let quiet = env.track(&one);
     assert!(
-        quiet
-            .err
-            .contains(&format!("bpm: ingest {}", one.display())),
+        quiet.err.contains(&format!("bpm: track {}", one.display())),
         "{}",
         quiet.err
     );
@@ -453,7 +451,7 @@ fn ingest_logs_its_start_and_counts_every_ten_files() {
     }
     write(&many.join("skip.txt"), b"no");
     let run = ok(env.bpm(&[
-        "ingest",
+        "track",
         many.to_str().unwrap(),
         "--whitelist",
         "*.png",
@@ -462,7 +460,7 @@ fn ingest_logs_its_start_and_counts_every_ten_files() {
         "--no-default-blacklist",
     ]));
     assert!(
-        run.err.contains(&format!("bpm: ingest {}", many.display())),
+        run.err.contains(&format!("bpm: track {}", many.display())),
         "{}",
         run.err
     );
@@ -496,7 +494,7 @@ fn scan_logs_its_total_and_counts_against_it() {
         write(&many.join(format!("f{index:03}.png")), b"12345678\n");
     }
     write(&many.join("skip.txt"), b"no");
-    ok(env.ingest(&many));
+    ok(env.track(&many));
     let run = ok(env.bpm(&["scan", many.to_str().unwrap(), "--whitelist", "*.png"]));
     assert!(run.err.contains("bpm: scan /"), "{}", run.err);
     assert!(run.err.contains("bpm: whitelist *.png"), "{}", run.err);
@@ -530,7 +528,7 @@ fn scan_logs_its_total_and_counts_against_it() {
 }
 
 #[test]
-fn ingest_summary_counts_copies_without_listing_paths() {
+fn track_summary_counts_copies_without_listing_paths() {
     let env = Env::new("copies");
     let pics = env.data().join("pics");
     let bytes = b"same bytes\n";
@@ -539,7 +537,7 @@ fn ingest_summary_counts_copies_without_listing_paths() {
     write(&pics.join("c.png"), bytes);
     write(&pics.join("other.png"), b"different\n");
 
-    let run = env.ingest(&pics);
+    let run = env.track(&pics);
     assert!(
         run.out
             .contains("4 files seen, 2 new files, 4 new locations, 2 copies, 0 already recorded"),
@@ -554,7 +552,7 @@ fn ingest_summary_counts_copies_without_listing_paths() {
 
     let more = env.data().join("more");
     write(&more.join("d.png"), bytes);
-    let again = env.ingest(&more);
+    let again = env.track(&more);
     assert!(
         again
             .out
@@ -564,7 +562,7 @@ fn ingest_summary_counts_copies_without_listing_paths() {
     );
     assert!(!again.out.contains("d.png"), "{}", again.out);
 
-    let repeat = env.ingest(&pics);
+    let repeat = env.track(&pics);
     assert!(
         repeat
             .out
@@ -581,10 +579,10 @@ fn scenario_13_duplicate_before_any_blake3_hashes_both_copies() {
     let archive = env.data().join("archive");
     write(&run42.join("S1_R1.fq.gz"), b"same bytes\n");
     write(&archive.join("S1_R1.fq.gz"), b"same bytes\n");
-    env.ingest(&run42);
+    env.track(&run42);
     assert_eq!(env.count("file_digests"), 0);
 
-    env.ingest(&archive);
+    env.track(&archive);
     let file = env.file_at(&run42.join("S1_R1.fq.gz"));
     assert_eq!(env.count("files"), 1);
     assert_eq!(file["locations"].as_array().unwrap().len(), 2);
@@ -603,12 +601,12 @@ fn scenario_13_duplicate_before_any_blake3_hashes_both_copies() {
 #[test]
 fn same_size_and_fingerprint_with_different_bytes_is_not_merged() {
     // Fingerprint equality alone never merges. Here the fingerprints differ
-    // too, so ingest does not even hash; a sampled pair is in the unit tests.
+    // too, so track does not even hash; a sampled pair is in the unit tests.
     let env = Env::new("nomerge");
     let run42 = env.data().join("run42");
     write(&run42.join("a.fq"), b"AAAA\n");
     write(&run42.join("b.fq"), b"BBBB\n");
-    env.ingest(&run42);
+    env.track(&run42);
     assert_eq!(env.count("files"), 2);
     assert_eq!(env.count("file_digests"), 0);
 }
@@ -627,14 +625,14 @@ fn scenario_14_an_unreadable_file_is_reported_and_not_fingerprinted() {
         eprintln!("skipping: this user can read a mode 000 file");
         return;
     }
-    let run = fail(env.bpm(&["ingest", run42.to_str().unwrap()]));
+    let run = fail(env.bpm(&["track", run42.to_str().unwrap()]));
     assert!(run.err.contains("locked.fq"), "{}", run.err);
     assert!(run.out.contains("1 errors"), "{}", run.out);
     // The readable file is still committed, and the run is complete.
     assert!(env.file_at(&run42.join("open.fq"))["fingerprint"].is_object());
     assert!(env.file_at(&locked)["fingerprint"].is_null());
-    assert_eq!(env.count("ingest_errors"), 1);
-    assert_eq!(env.scalar("SELECT status FROM ingest_runs"), "complete");
+    assert_eq!(env.count("track_errors"), 1);
+    assert_eq!(env.scalar("SELECT status FROM track_runs"), "complete");
 }
 
 #[test]
@@ -643,7 +641,7 @@ fn scenario_15_stat_drift_and_backend_selection() {
     let run42 = env.data().join("run42");
     let fq = run42.join("S1_R1.fq.gz");
     write(&fq, b"0123456789\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.scan(&run42);
     let id = env.id_at(&fq);
     assert_eq!(env.drift(&fq), ["ok"]);
@@ -672,7 +670,7 @@ fn stat_changed_stays_until_acknowledged() {
     let run42 = env.data().join("run42");
     let fq = run42.join("a.fq");
     write(&fq, b"abc\n");
-    env.ingest(&run42);
+    env.track(&run42);
     write(&fq, b"abcdef\n");
     env.scan(&run42);
     env.scan(&run42);
@@ -702,14 +700,14 @@ fn stat_changed_stays_until_acknowledged() {
 }
 
 #[test]
-fn a_drifted_copy_does_not_hide_its_siblings_from_ingest() {
+fn a_drifted_copy_does_not_hide_its_siblings_from_track() {
     let env = Env::new("sibling");
     let run42 = env.data().join("run42");
     let a = run42.join("a.fq");
     let b = run42.join("b.fq");
     write(&a, b"the accepted bytes\n");
     write(&b, b"the accepted bytes\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.scan(&run42);
     let id = env.id_at(&a);
     let before = env.sql("SELECT size_bytes, mtime, fingerprint FROM files");
@@ -725,7 +723,7 @@ fn a_drifted_copy_does_not_hide_its_siblings_from_ingest() {
     // Another copy of the accepted bytes still joins the same file.
     let archive = env.data().join("archive");
     write(&archive.join("c.fq"), b"the accepted bytes\n");
-    env.ingest(&archive);
+    env.track(&archive);
     assert_eq!(env.id_at(&archive.join("c.fq")), id);
     assert_eq!(env.count("files"), 1);
 }
@@ -739,8 +737,8 @@ fn a_first_digest_comes_from_an_unchanged_copy() {
     let b = run42.join("b.fq");
     write(&a, b"copy\n");
     write(&b, b"copy\n");
-    env.ingest(&run42);
-    // Ingest hashed both to merge them; forget that to test scan alone.
+    env.track(&run42);
+    // Track hashed both to merge them; forget that to test scan alone.
     ok(env.bpm(&["sql", "--write", "DELETE FROM file_digests"]));
     ok(env.bpm(&[
         "sql",
@@ -754,11 +752,11 @@ fn a_first_digest_comes_from_an_unchanged_copy() {
 }
 
 #[test]
-fn ingest_and_scan_do_not_need_home_when_the_catalog_is_named() {
+fn track_and_scan_do_not_need_home_when_the_catalog_is_named() {
     let env = Env::new("nohome");
     write(&env.data().join("a.fq"), b"a\n");
     for args in [
-        vec!["ingest", env.data().to_str().unwrap()],
+        vec!["track", env.data().to_str().unwrap()],
         vec!["scan", env.data().to_str().unwrap()],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_bpm"))
@@ -780,8 +778,8 @@ fn ingest_and_scan_do_not_need_home_when_the_catalog_is_named() {
 }
 
 #[test]
-fn a_new_file_already_committed_by_another_ingest_becomes_a_location() {
-    use bpm3::catalog::{AckObservation, Catalog, IngestEntry, RunKind, Seen};
+fn a_new_file_already_committed_by_another_track_becomes_a_location() {
+    use bpm3::catalog::{AckObservation, Catalog, RunKind, Seen, TrackEntry};
     use bpm3::model::{FileRef, Fingerprint};
 
     let env = Env::new("race");
@@ -789,17 +787,17 @@ fn a_new_file_already_committed_by_another_ingest_becomes_a_location() {
     let second = env.data().join("second/x.fq");
     write(&first, b"same\n");
     write(&second, b"same\n");
-    env.ingest(first.parent().unwrap());
+    env.track(first.parent().unwrap());
     env.scan(first.parent().unwrap());
     let id = env.id_at(&first);
     let blake3 = env.scalar("SELECT digest FROM file_digests");
 
-    // A second ingest that hashed the copy before the first committed.
+    // A second track that hashed the copy before the first committed.
     let mut catalog = Catalog::open_write(&env.catalog).unwrap();
     let run = catalog
-        .start_run(RunKind::Ingest, "posix", "/second")
+        .start_run(RunKind::Track, "posix", "/second")
         .unwrap();
-    let entry = IngestEntry::New {
+    let entry = TrackEntry::New {
         fingerprint: Some(Fingerprint {
             scheme: "xxh3-128-head-256k".into(),
             hex: "0".repeat(32),
@@ -811,7 +809,7 @@ fn a_new_file_already_committed_by_another_ingest_becomes_a_location() {
             mtime: None,
         }],
     };
-    let applied = catalog.apply_ingest(&run, &[entry], &[]).unwrap();
+    let applied = catalog.apply_track(&run, &[entry], &[]).unwrap();
     assert_eq!((applied.created, applied.located), (0, 1));
     catalog.finish_run(run, true, 1, 0).unwrap();
 
@@ -839,12 +837,12 @@ fn a_copy_of_a_file_fingerprinted_under_an_earlier_scheme_is_found() {
     use xxhash_rust::xxh3::xxh3_128;
 
     let env = Env::new("old-scheme");
-    let bytes = b"ACGT ingested before the head scheme\n";
-    let other = b"TGCA ingested before the head scheme\n";
+    let bytes = b"ACGT tracked before the head scheme\n";
+    let other = b"TGCA tracked before the head scheme\n";
     let first = env.data().join("first");
     write(&first.join("x.fq"), bytes);
     write(&first.join("y.fq"), other);
-    env.ingest(&first);
+    env.track(&first);
     // Rewrite both rows as an earlier build stored them.
     let conn = rusqlite::Connection::open(&env.catalog).unwrap();
     for (name, content) in [("x.fq", &bytes[..]), ("y.fq", &other[..])] {
@@ -862,7 +860,7 @@ fn a_copy_of_a_file_fingerprinted_under_an_earlier_scheme_is_found() {
 
     let second = env.data().join("second");
     write(&second.join("x.fq"), bytes);
-    let run = env.ingest(&second);
+    let run = env.track(&second);
     assert!(run.out.contains("1 copies"), "{}", run.out);
     assert_eq!(env.count("files"), 2);
     assert_eq!(
@@ -879,7 +877,7 @@ fn scan_moves_a_row_to_the_current_scheme_only_when_blake3_holds() {
     let changed = run42.join("changed.fq");
     write(&kept, b"same bytes\n");
     write(&changed, b"generation one\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.scan(&run42);
     let conn = rusqlite::Connection::open(&env.catalog).unwrap();
     for path in [&kept, &changed] {
@@ -910,7 +908,7 @@ fn scenario_16_digest_drift_and_acknowledge() {
     let other = run42.join("S2_R1.fq.gz");
     write(&fq, b"generation one\n");
     write(&other, b"second file\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.scan(&run42);
     let id = env.id_at(&fq);
     let first = env.file_at(&fq)["digests"][0]["digest"]
@@ -985,7 +983,7 @@ fn acknowledge_refuses_locations_that_disagree() {
     let b = run42.join("b.fq");
     write(&a, b"copy\n");
     write(&b, b"copy\n");
-    env.ingest(&run42);
+    env.track(&run42);
     assert_eq!(env.count("files"), 1);
     write(&a, b"COPY\n");
     set_mtime(&a, "202001010000");
@@ -1010,13 +1008,13 @@ fn scenario_17_move_with_a_digest() {
     let old = run42.join("S1_R1.fq.gz");
     let new = archive.join("S1_R1.fq.gz");
     write(&old, b"hashed before the move\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.scan(&run42);
     let id = env.id_at(&old);
 
     fs::create_dir_all(&archive).unwrap();
     fs::rename(&old, &new).unwrap();
-    env.ingest(&archive);
+    env.track(&archive);
     assert_eq!(env.id_at(&new), id);
     let scan = env.scan(&run42);
     assert!(scan.out.contains("missing"), "{}", scan.out);
@@ -1042,14 +1040,14 @@ fn scenario_18_move_without_a_readable_source() {
     let old = run42.join("S1_R1.fq.gz");
     let new = archive.join("S1_R1.fq.gz");
     write(&old, b"never hashed\n");
-    env.ingest(&run42);
+    env.track(&run42);
     let id = env.id_at(&old);
 
     fs::create_dir_all(&archive).unwrap();
     fs::rename(&old, &new).unwrap();
     env.scan(&run42);
     assert_eq!(env.drift(&old), ["missing"]);
-    let run = env.ingest(&archive);
+    let run = env.track(&archive);
     assert!(run.out.contains("possible duplicate"), "{}", run.out);
     assert!(run.out.contains(&id), "{}", run.out);
     assert_ne!(env.id_at(&new), id);
@@ -1059,23 +1057,23 @@ fn scenario_18_move_without_a_readable_source() {
 #[test]
 fn scenario_19_two_copies_are_one_file() {
     let env = Env::new("s19");
-    // Copies in one ingest, in one batch.
+    // Copies in one track, in one batch.
     let together = env.data().join("together");
     write(&together.join("a/x.bam"), b"bam bytes\n");
     write(&together.join("b/x.bam"), b"bam bytes\n");
-    env.ingest(&together);
+    env.track(&together);
     let file = env.file_at(&together.join("a/x.bam"));
     assert_eq!(file["locations"].as_array().unwrap().len(), 2);
     assert_eq!(strings(&file["drift"]), ["ok"]);
     assert_eq!(env.count("files"), 1);
 
-    // Copies in two ingests.
+    // Copies in two tracks.
     let first = env.data().join("first");
     let second = env.data().join("second");
     write(&first.join("y.bam"), b"other bam bytes\n");
     write(&second.join("y.bam"), b"other bam bytes\n");
-    env.ingest(&first);
-    env.ingest(&second);
+    env.track(&first);
+    env.track(&second);
     assert_eq!(
         env.id_at(&first.join("y.bam")),
         env.id_at(&second.join("y.bam"))
@@ -1090,7 +1088,7 @@ fn scenario_20_link_query_and_unlink() {
     let fq = run42.join("S1_R1.fq.gz");
     write(&fq, b"reads\n");
     write(&run42.join("unrelated.fq"), b"other\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.create(&["program", "--name", "CLL"]);
     env.create(&["project", "--parent", "/CLL", "--name", "WES"]);
     let case = env.create(&["case", "--parent", "/CLL/WES"]);
@@ -1157,7 +1155,7 @@ fn scenario_21_unlink_and_cascade_delete_keep_files_and_bytes() {
     let run42 = env.data().join("run42");
     let fq = run42.join("S1_R1.fq.gz");
     write(&fq, b"reads\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.create(&["program", "--name", "CLL"]);
     env.create(&["project", "--parent", "/CLL", "--name", "WES"]);
     let case = env.create(&["case", "--parent", "/CLL/WES"]);
@@ -1190,7 +1188,7 @@ fn deleting_a_linked_file_needs_cascade() {
     let env = Env::new("delfile");
     let run42 = env.data().join("run42");
     write(&run42.join("a.fq"), b"a\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.create(&["program", "--name", "CLL"]);
     let id = env.id_at(&run42.join("a.fq"));
     ok(env.bpm(&["link", "--yes", "--to", "/CLL", &id, "--role", "data"]));
@@ -1207,7 +1205,7 @@ fn scan_md5_is_a_second_digest_of_the_same_generation() {
     let run42 = env.data().join("run42");
     let fq = run42.join("a.fq");
     write(&fq, b"ACGT\n");
-    env.ingest(&run42);
+    env.track(&run42);
     env.scan(&run42);
     assert_eq!(env.count("file_digests"), 1);
     ok(env.bpm(&["scan", "--md5", run42.to_str().unwrap()]));
@@ -1242,13 +1240,13 @@ fn blake3_hex(bytes: &[u8]) -> String {
     // The CLI is the only hasher the tests use; ask it through a scratch catalog.
     let env = Env::new("b3");
     write(&env.data().join("x"), bytes);
-    env.ingest(&env.data());
+    env.track(&env.data());
     env.scan(&env.data());
     env.scalar("SELECT digest FROM file_digests")
 }
 
 #[test]
-fn path_filters_apply_to_ingest_and_scan() {
+fn path_filters_apply_to_track_and_scan() {
     let env = Env::new("filters");
     let run42 = env.data().join("run42");
     for name in [
@@ -1293,15 +1291,15 @@ fn path_filters_apply_to_ingest_and_scan() {
         uris
     };
 
-    // A whitelist that matches nothing ingests nothing.
-    let none = env.bpm(&["ingest", run42.to_str().unwrap(), "--whitelist", "*.cram"]);
+    // A whitelist that matches nothing tracks nothing.
+    let none = env.bpm(&["track", run42.to_str().unwrap(), "--whitelist", "*.cram"]);
     assert!(ok(none).out.contains("0 files seen"));
 
-    env.ingest(&run42);
+    env.track(&run42);
     assert_eq!(uris(&env), ["S1.fq.gz", "keep/scratch/x.fq.gz", "old.bak"]);
 
     // --blacklist replaces the global list for one run; built-ins still apply.
-    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--blacklist", "*.bak"]));
+    ok(env.bpm(&["track", run42.to_str().unwrap(), "--blacklist", "*.bak"]));
     assert_eq!(
         uris(&env),
         [
@@ -1312,7 +1310,7 @@ fn path_filters_apply_to_ingest_and_scan() {
             "scratch/tmp.fq.gz"
         ]
     );
-    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--no-default-blacklist"]));
+    ok(env.bpm(&["track", run42.to_str().unwrap(), "--no-default-blacklist"]));
     assert_eq!(uris(&env).len(), 7);
 
     // Scan applies the same filters to the locations it checks.
@@ -1326,12 +1324,12 @@ fn path_filters_apply_to_ingest_and_scan() {
         "blacklist = \"*.txt\"\n",
     )
     .unwrap();
-    let bad = fail(env.bpm(&["ingest", run42.to_str().unwrap()]));
+    let bad = fail(env.bpm(&["track", run42.to_str().unwrap()]));
     assert!(bad.err.contains("config.toml"), "{}", bad.err);
 }
 
 #[test]
-fn a_config_whitelist_limits_ingest_until_a_flag_replaces_it() {
+fn a_config_whitelist_limits_track_until_a_flag_replaces_it() {
     let env = Env::new("config-whitelist");
     let run42 = env.data().join("run42");
     for name in [
@@ -1376,13 +1374,13 @@ fn a_config_whitelist_limits_ingest_until_a_flag_replaces_it() {
         uris
     };
 
-    env.ingest(&run42);
+    env.track(&run42);
     assert_eq!(uris(&env), ["S1.fq.gz", "keep/scratch/x.fq.gz"]);
     let scan = ok(env.bpm(&["scan", run42.to_str().unwrap()]));
     assert!(scan.out.contains(": 2 locations"), "{}", scan.out);
 
     // --whitelist replaces the config list. The config blacklist still applies.
-    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--whitelist", "*.bam"]));
+    ok(env.bpm(&["track", run42.to_str().unwrap(), "--whitelist", "*.bam"]));
     assert_eq!(uris(&env), ["S1.bam", "S1.fq.gz", "keep/scratch/x.fq.gz"]);
     // A later scan with no flag is back on the config whitelist, so the bam is not checked.
     let scan = ok(env.bpm(&["scan", run42.to_str().unwrap()]));
@@ -1393,7 +1391,7 @@ fn a_config_whitelist_limits_ingest_until_a_flag_replaces_it() {
     assert!(scan.out.contains(": 1 locations"), "{}", scan.out);
 
     // --blacklist replaces only the blacklist. scratch/** is gone; *.fq.gz remains.
-    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--blacklist", ""]));
+    ok(env.bpm(&["track", run42.to_str().unwrap(), "--blacklist", ""]));
     assert_eq!(
         uris(&env),
         [
@@ -1405,7 +1403,7 @@ fn a_config_whitelist_limits_ingest_until_a_flag_replaces_it() {
     );
 
     // --whitelist '' clears the config whitelist. Built-ins and scratch/** return.
-    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--whitelist", ""]));
+    ok(env.bpm(&["track", run42.to_str().unwrap(), "--whitelist", ""]));
     assert_eq!(
         uris(&env),
         [
@@ -1419,10 +1417,10 @@ fn a_config_whitelist_limits_ingest_until_a_flag_replaces_it() {
     );
 
     // Lifting the built-in names does not lift the config whitelist.
-    ok(env.bpm(&["ingest", run42.to_str().unwrap(), "--no-default-blacklist"]));
+    ok(env.bpm(&["track", run42.to_str().unwrap(), "--no-default-blacklist"]));
     assert!(!uris(&env).iter().any(|uri| uri == ".DS_Store"));
     ok(env.bpm(&[
-        "ingest",
+        "track",
         run42.to_str().unwrap(),
         "--no-default-blacklist",
         "--whitelist",
@@ -1435,7 +1433,7 @@ fn a_config_whitelist_limits_ingest_until_a_flag_replaces_it() {
         "whitelist = \"*.fq.gz\"\n",
     )
     .unwrap();
-    let bad = fail(env.bpm(&["ingest", run42.to_str().unwrap()]));
+    let bad = fail(env.bpm(&["track", run42.to_str().unwrap()]));
     assert!(
         bad.err.contains("whitelist must be an array of strings"),
         "{}",
@@ -1445,7 +1443,7 @@ fn a_config_whitelist_limits_ingest_until_a_flag_replaces_it() {
     write(&run42.join("extra.bam"), b"extra");
     write(&run42.join("extra.txt"), b"extra");
     ok(env.bpm(&[
-        "ingest",
+        "track",
         run42.to_str().unwrap(),
         "--blacklist",
         "*.txt",
@@ -1491,7 +1489,7 @@ fn a_broken_symlink_is_counted_and_the_run_succeeds() {
     let one = env.data().join("one");
     write(&one.join("keep.png"), b"png\n");
     symlink(one.join("missing.chain"), one.join("hg19.over.chain")).unwrap();
-    let run = env.ingest(&one);
+    let run = env.track(&one);
     assert!(
         run.err.contains("bpm: 1 broken symbolic link\n"),
         "{}",
@@ -1501,13 +1499,13 @@ fn a_broken_symlink_is_counted_and_the_run_succeeds() {
     assert!(run.out.contains("1 files seen"), "{}", run.out);
     assert!(run.out.contains("0 errors"), "{}", run.out);
     assert_eq!(env.count("files"), 1);
-    assert_eq!(env.count("ingest_errors"), 0);
+    assert_eq!(env.count("track_errors"), 0);
 
     let two = env.data().join("two");
     write(&two.join("keep.png"), b"png\n");
     symlink(two.join("gone-a"), two.join("a.chain")).unwrap();
     symlink(two.join("gone-b"), two.join("b.chain")).unwrap();
-    let run = env.ingest(&two);
+    let run = env.track(&two);
     assert!(
         run.err.contains("bpm: 2 broken symbolic links"),
         "{}",
@@ -1531,7 +1529,7 @@ fn symlinks_follow_the_walk_rules() {
     symlink(root.join("real"), root.join("alias")).unwrap();
     symlink(&root, root.join("real/loop")).unwrap();
 
-    let run = fail(env.bpm(&["ingest", root.to_str().unwrap()]));
+    let run = fail(env.bpm(&["track", root.to_str().unwrap()]));
     assert!(run.err.contains("outside_root"), "{}", run.err);
     assert!(!run.err.contains("loop"), "{}", run.err);
     // The directory link inside the root is walked once, under one of its two
@@ -1574,7 +1572,7 @@ fn symlinks_follow_the_walk_rules() {
     let flat = env.data().join("flat");
     write(&flat.join("target.fq"), b"target bytes\n");
     symlink(flat.join("target.fq"), flat.join("pointer.fq")).unwrap();
-    env.ingest(&flat);
+    env.track(&flat);
     let file = env.file_at(&flat.join("pointer.fq"));
     assert_eq!(file["locations"].as_array().unwrap().len(), 2);
     assert_eq!(
@@ -1603,12 +1601,12 @@ fn symlinks_follow_the_walk_rules() {
     write(&hidden.join("notes.txt"), b"notes\n");
     symlink(filtered.join(".DS_Store"), filtered.join("innocent.fq")).unwrap();
     symlink(hidden.join("notes.txt"), filtered.join("also.fq")).unwrap();
-    let run = ok(env.bpm(&["ingest", filtered.to_str().unwrap(), "--blacklist", "*.txt"]));
+    let run = ok(env.bpm(&["track", filtered.to_str().unwrap(), "--blacklist", "*.txt"]));
     assert!(run.out.contains("0 files seen"), "{}", run.out);
 }
 
 #[test]
-fn ingest_commits_in_batches_and_finishes_large_runs() {
+fn track_commits_in_batches_and_finishes_large_runs() {
     let env = Env::new("batch");
     let many = env.data().join("many");
     fs::create_dir_all(&many).unwrap();
@@ -1619,7 +1617,7 @@ fn ingest_commits_in_batches_and_finishes_large_runs() {
         )
         .unwrap();
     }
-    let run = env.ingest(&many);
+    let run = env.track(&many);
     assert!(run.out.contains("2345 new files"), "{}", run.out);
     assert_eq!(env.count("files"), 2_345);
     let scan = env.scan(&many);
@@ -1636,7 +1634,7 @@ fn a_run_whose_process_died_is_marked_incomplete() {
         "sql",
         "--write",
         &format!(
-            "INSERT INTO ingest_runs (id, backend, root_uri, started_at, status, files_seen, files_created)
+            "INSERT INTO track_runs (id, backend, root_uri, started_at, status, files_seen, files_created)
              VALUES ('{dead}', 'posix', '/x', '2026-01-01T00:00:00.000Z', 'running', 0, 0),
                     ('{alive}', 'posix', '/y', '2026-01-01T00:00:00.000Z', 'running', 0, 0)"
         ),
@@ -1650,7 +1648,7 @@ fn a_run_whose_process_died_is_marked_incomplete() {
     // Any writing command recovers.
     env.create(&["program", "--name", "P"]);
     assert_eq!(
-        env.sql("SELECT id, status, finished_at IS NOT NULL AS done FROM ingest_runs ORDER BY id"),
+        env.sql("SELECT id, status, finished_at IS NOT NULL AS done FROM track_runs ORDER BY id"),
         env.sql(&format!(
             "SELECT '{dead}' AS id, 'incomplete' AS status, 1 AS done
              UNION ALL SELECT '{alive}', 'running', 0"
@@ -1663,13 +1661,13 @@ fn a_run_whose_process_died_is_marked_incomplete() {
     env.create(&["program", "--name", "Q"]);
     assert_eq!(
         env.scalar(&format!(
-            "SELECT status FROM ingest_runs WHERE id = '{alive}'"
+            "SELECT status FROM track_runs WHERE id = '{alive}'"
         )),
         "incomplete"
     );
     // Finished runs leave no lock files behind.
     write(&env.data().join("a.fq"), b"a\n");
-    env.ingest(&env.data());
+    env.track(&env.data());
     env.scan(&env.data());
     let leftovers: Vec<_> = fs::read_dir(env.home())
         .unwrap()
@@ -1679,7 +1677,14 @@ fn a_run_whose_process_died_is_marked_incomplete() {
     assert!(leftovers.is_empty());
 }
 
-/// Take a fresh catalog back to version 2 by removing what V003 added.
+/// Take a fresh catalog back to version 3 by undoing V004's renames.
+const BACK_TO_V3: &str = "ALTER TABLE track_runs RENAME TO ingest_runs;
+     ALTER TABLE track_errors RENAME TO ingest_errors;
+     DROP INDEX track_errors_run;
+     CREATE INDEX ingest_errors_run ON ingest_errors (run_id);
+     UPDATE catalog_meta SET value = '3' WHERE key = 'schema_version';";
+
+/// Take a version 3 catalog back to version 2 by removing what V003 added.
 const BACK_TO_V2: &str = "DROP TABLE link_role_changes;
      DROP TABLE link_runs;
      DROP TABLE link_roles;
@@ -1696,10 +1701,34 @@ const BACK_TO_V2: &str = "DROP TABLE link_role_changes;
      UPDATE catalog_meta SET value = '2' WHERE key = 'schema_version';";
 
 #[test]
+fn a_version_3_catalog_keeps_its_ingest_runs_as_track_runs() {
+    let env = Env::new("v3");
+    write(&env.data().join("a.fq"), b"a\n");
+    env.track(&env.data());
+    {
+        let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V3).unwrap();
+    }
+    let refused = fail(env.bpm(&["query", "files"]));
+    assert!(refused.err.contains("older"), "{}", refused.err);
+    write(&env.data().join("b.fq"), b"b\n");
+    env.track(&env.data());
+    assert_eq!(
+        env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
+        "4"
+    );
+    assert_eq!(
+        env.scalar("SELECT group_concat(files_created, ' ') FROM (SELECT files_created FROM track_runs ORDER BY started_at)"),
+        "1 1"
+    );
+}
+
+#[test]
 fn a_version_1_catalog_migrates_to_the_file_indexes() {
     let env = Env::new("v1");
     {
         let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V3).unwrap();
         conn.execute_batch(BACK_TO_V2).unwrap();
         conn.execute_batch(
             "DROP INDEX files_fingerprint;
@@ -1712,10 +1741,10 @@ fn a_version_1_catalog_migrates_to_the_file_indexes() {
     let refused = fail(env.bpm(&["query", "files"]));
     assert!(refused.err.contains("older"), "{}", refused.err);
     write(&env.data().join("a.fq"), b"a\n");
-    env.ingest(&env.data());
+    env.track(&env.data());
     assert_eq!(
         env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
-        "3"
+        "4"
     );
     assert_eq!(
         env.scalar(
@@ -1730,11 +1759,12 @@ fn a_version_1_catalog_migrates_to_the_file_indexes() {
 fn a_version_2_catalog_keeps_its_links_and_their_roles_become_known() {
     let env = Env::new("v2");
     write(&env.data().join("a.fq"), b"a\n");
-    env.ingest(&env.data());
+    env.track(&env.data());
     env.create(&["program", "--name", "CLL"]);
     let id = env.id_at(&env.data().join("a.fq"));
     {
         let conn = rusqlite::Connection::open(&env.catalog).unwrap();
+        conn.execute_batch(BACK_TO_V3).unwrap();
         conn.execute_batch(BACK_TO_V2).unwrap();
         // A role the old `bpm link` accepted, outside the seeded list.
         conn.execute(
@@ -1748,10 +1778,10 @@ fn a_version_2_catalog_keeps_its_links_and_their_roles_become_known() {
     assert!(refused.err.contains("older"), "{}", refused.err);
     // Any writing command migrates; link is one.
     write(&env.data().join("b.fq"), b"b\n");
-    env.ingest(&env.data());
+    env.track(&env.data());
     assert_eq!(
         env.scalar("SELECT value FROM catalog_meta WHERE key = 'schema_version'"),
-        "3"
+        "4"
     );
     assert_eq!(
         env.scalar("SELECT COUNT(*) FROM file_links WHERE run_id IS NULL AND role = 'control'"),

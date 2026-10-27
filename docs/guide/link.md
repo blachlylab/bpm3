@@ -6,10 +6,10 @@
 
 `bpm link` attaches files that are already in the catalog to entities. It links one file to one entity, or a thousand files to a thousand entities it creates on the way, in one command and one transaction. `bpm unlink` takes the same arguments and removes links. `bpm undo` removes everything one link run wrote.
 
-Ingest first. `bpm link` reads the catalog, not the filesystem, so a file that has not been ingested is not there to link.
+Track first. `bpm link` reads the catalog, not the filesystem, so a file that has not been tracked is not there to link.
 
 ```
-bpm ingest /data/run42
+bpm track /data/run42
 bpm link --to '/CLL/WES/case[subject_id:{1}]?/sample?/raw_data[read:{2}]+' \
   --match '([A-Za-z0-9]+)_(R[12])\.fq\.gz' --role data /data/run42
 ```
@@ -65,7 +65,7 @@ Operands are file ids or catalog locations:
 - **A file id** reaches every location of that file.
 - **A path that is a location** reaches that location.
 - **A path that is not a location** is treated as a directory. It reaches every location in the catalog below it, at any depth. Prefixes stop at a path component, so `/data/run1` does not reach `/data/run10`.
-- **An operand that reaches nothing** fails the command, and the message says to run `bpm ingest`.
+- **An operand that reaches nothing** fails the command, and the message says to run `bpm track`.
 - **Object-store URIs** such as `s3://bucket/prefix` are refused until the object-store milestone.
 
 A file reached through two locations or two operands is linked once. If the two locations would give it different targets or roles, the run fails and names both.
@@ -264,5 +264,5 @@ Undo needs only what each row records: link runs tag the links and the entities 
 
 These were discussed and set aside for a later decision:
 
-- **A not-ingested check.** Counting files on disk under a directory operand that are missing from the catalog. The open question is which blacklist and whitelist to apply, since link takes neither.
+- **A not-tracked check.** Counting files on disk under a directory operand that are missing from the catalog. The open question is which blacklist and whitelist to apply, since link takes neither.
 - **Mapping a capture to a role.** For example `--role '{ext}' --role-map bam=data,bai=index`, which would replace the two-pass recipe above.

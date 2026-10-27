@@ -101,7 +101,7 @@ impl Fixture {
         fs::create_dir_all(&data).unwrap();
         fs::write(data.join("S1_R1.fq.gz"), b"reads one\n").unwrap();
         fs::write(data.join("S1_R2.fq.gz"), b"reads two\n").unwrap();
-        run(&["ingest", data.to_str().unwrap()]);
+        run(&["track", data.to_str().unwrap()]);
         run(&["scan", data.to_str().unwrap()]);
         run(&[
             "link",

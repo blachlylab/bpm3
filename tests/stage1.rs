@@ -181,7 +181,7 @@ fn scenario_01_init_modes_and_force() {
         &default,
         "SELECT value FROM catalog_meta WHERE key = 'schema_version'",
     ));
-    assert_eq!(version, "3");
+    assert_eq!(version, "4");
 
     ok(bpm(home, home, &["init", "--force"]));
     let id_after = line(&sql(
@@ -1382,7 +1382,7 @@ fn schema_newer_is_refused_and_a_missing_version_is_corrupt() {
     std::thread::sleep(Duration::from_millis(20));
     let refused = fail(bpm(home, home, &["--catalog", cat, "query", "entities"]));
     assert!(
-        refused.err.contains("99") && refused.err.contains("(version 3)"),
+        refused.err.contains("99") && refused.err.contains("(version 4)"),
         "{}",
         refused.err
     );

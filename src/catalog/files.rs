@@ -1,7 +1,7 @@
-//! File rows: ingest batches, scan observations, acknowledge, links, location
+//! File rows: track batches, scan observations, acknowledge, links, location
 //! and file deletes, and file queries.
 //!
-//! Hashing happens in [`crate::ingest`] with no lock held. The methods here
+//! Hashing happens in [`crate::track`] with no lock held. The methods here
 //! that take the write lock only apply what was already computed, so the lock
 //! is held for the length of one batch's inserts.
 
@@ -39,9 +39,9 @@ pub struct Candidate {
     pub locations: Vec<Seen>,
 }
 
-/// What ingest decided for one new path, applied in one batch.
+/// What track decided for one new path, applied in one batch.
 #[derive(Debug, Clone)]
-pub enum IngestEntry {
+pub enum TrackEntry {
     /// A new file id. More than one path means the batch found copies with the
     /// same BLAKE3. `blake3` is set when the bytes were hashed for that test.
     New {
@@ -62,7 +62,7 @@ pub enum IngestEntry {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct IngestApplied {
+pub struct TrackApplied {
     pub created: u64,
     pub located: u64,
     /// Locations attached to a file that already had one, or to a file that
@@ -195,22 +195,22 @@ impl Catalog {
         Ok(candidates)
     }
 
-    /// Apply one ingest batch under the write lock. A path another process
+    /// Apply one track batch under the write lock. A path another process
     /// recorded since the batch was planned is skipped. A merge whose file
     /// gained a different BLAKE3 meanwhile becomes a new file instead.
-    pub fn apply_ingest(
+    pub fn apply_track(
         &mut self,
         run: &Run,
-        entries: &[IngestEntry],
+        entries: &[TrackEntry],
         errors: &[(String, String)],
-    ) -> Result<IngestApplied, Error> {
+    ) -> Result<TrackApplied, Error> {
         self.require_write()?;
         let stamp = timestamp();
         let tx = begin(&mut self.conn, &self.path)?;
-        let mut applied = IngestApplied::default();
+        let mut applied = TrackApplied::default();
         for entry in entries {
             match entry {
-                IngestEntry::New {
+                TrackEntry::New {
                     fingerprint,
                     blake3,
                     seen,
@@ -224,7 +224,7 @@ impl Catalog {
                     if fresh.is_empty() {
                         continue;
                     }
-                    // Another ingest may have committed these bytes while this
+                    // Another track may have committed these bytes while this
                     // batch was hashed. Only a BLAKE3 match merges.
                     if let Some(blake3) = blake3 {
                         if let Some(existing) = file_with_digest(&tx, "blake3", blake3)? {
@@ -241,7 +241,7 @@ impl Catalog {
                     applied.located += fresh.len() as u64;
                     applied.copies += fresh.len().saturating_sub(1) as u64;
                 }
-                IngestEntry::Located {
+                TrackEntry::Located {
                     file_id,
                     blake3,
                     verified,
@@ -371,7 +371,7 @@ impl Catalog {
     /// BLAKE3 that holds.
     ///
     /// The file row's size, mtime, and fingerprint describe the bytes of the
-    /// current digest, because ingest matches duplicates on them. A location
+    /// current digest, because track matches duplicates on them. A location
     /// whose bytes do not hold that digest keeps its new stat on the location
     /// only; acknowledge is what moves it onto the file.
     pub fn apply_scan(

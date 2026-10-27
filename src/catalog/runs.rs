@@ -1,4 +1,4 @@
-//! Ingest and scan run logs, and the per-run liveness lock.
+//! Track and scan run logs, and the per-run liveness lock.
 //!
 //! A run holds an exclusive flock on `<catalog>.run-<id>.lock` for its whole
 //! life. The catalog write lock is released between batches, so it cannot say
@@ -18,21 +18,21 @@ use crate::error::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunKind {
-    Ingest,
+    Track,
     Scan,
 }
 
 impl RunKind {
     fn table(self) -> &'static str {
         match self {
-            Self::Ingest => "ingest_runs",
+            Self::Track => "track_runs",
             Self::Scan => "scan_runs",
         }
     }
 
     pub(super) fn errors_table(self) -> &'static str {
         match self {
-            Self::Ingest => "ingest_errors",
+            Self::Track => "track_errors",
             Self::Scan => "scan_errors",
         }
     }
@@ -79,8 +79,8 @@ impl Catalog {
         let stamp = timestamp();
         let tx = begin(&mut self.conn, &self.path)?;
         match kind {
-            RunKind::Ingest => tx.execute(
-                "INSERT INTO ingest_runs (id, backend, root_uri, started_at, status, files_seen, files_created)
+            RunKind::Track => tx.execute(
+                "INSERT INTO track_runs (id, backend, root_uri, started_at, status, files_seen, files_created)
                  VALUES (?, ?, ?, ?, 'running', 0, 0)",
                 params![id.to_string(), backend, root_uri, stamp],
             )?,
@@ -108,8 +108,8 @@ impl Catalog {
         let stamp = timestamp();
         let tx = begin(&mut self.conn, &self.path)?;
         match run.kind {
-            RunKind::Ingest => tx.execute(
-                "UPDATE ingest_runs SET status = ?, finished_at = ?, files_seen = ?, files_created = ?
+            RunKind::Track => tx.execute(
+                "UPDATE track_runs SET status = ?, finished_at = ?, files_seen = ?, files_created = ?
                  WHERE id = ?",
                 params![status, stamp, seen as i64, created as i64, run.id.to_string()],
             )?,
@@ -130,7 +130,7 @@ impl Catalog {
     /// writable open.
     pub(super) fn recover_runs(&mut self) -> Result<(), Error> {
         let mut dead = Vec::new();
-        for kind in [RunKind::Ingest, RunKind::Scan] {
+        for kind in [RunKind::Track, RunKind::Scan] {
             let mut stmt = self.conn.prepare(&format!(
                 "SELECT id FROM {} WHERE status = 'running'",
                 kind.table()
