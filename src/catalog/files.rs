@@ -141,19 +141,6 @@ impl Catalog {
         location_exists(&self.conn, backend, uri)
     }
 
-    /// The fingerprint schemes other than `scheme` on files with this size.
-    pub fn other_schemes(&self, size: i64, scheme: &str) -> Result<Vec<String>, Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT DISTINCT fingerprint_scheme FROM files
-             WHERE size_bytes = ? AND fingerprint_scheme IS NOT NULL AND fingerprint_scheme <> ?
-             ORDER BY fingerprint_scheme",
-        )?;
-        let schemes = stmt
-            .query_map(params![size, scheme], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(schemes)
-    }
-
     /// Files with this size and the same fingerprint scheme and value.
     pub fn fingerprint_matches(
         &self,

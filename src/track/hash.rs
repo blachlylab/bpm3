@@ -1,7 +1,7 @@
 //! Fingerprints and full digests. Reads bytes; never touches the catalog.
 
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read};
 use std::path::Path;
 
 use md5::{Digest, Md5};
@@ -15,21 +15,8 @@ use crate::model::Fingerprint;
 /// different one is a new scheme name.
 pub const HEAD_SCHEME: &str = "xxh3-128-head-256k";
 
-/// XXH3-128 of the whole file, for files up to and including
-/// [`SAMPLE_CUTOFF`]. No longer written; computed only to compare a new path
-/// with a row that carries it.
-pub const FULL_SCHEME: &str = "xxh3-128-full";
-
-/// XXH3-128 of the file size as 8 little-endian bytes, then the first MiB, the
-/// MiB centered on the midpoint, and the last MiB, for files over
-/// [`SAMPLE_CUTOFF`]. No longer written, as for [`FULL_SCHEME`].
-pub const SAMPLE_SCHEME: &str = "xxh3-128-sample-v1";
-
 const KIB: u64 = 1 << 10;
-const MIB: u64 = 1 << 20;
 pub const HEAD: u64 = 256 * KIB;
-pub const SAMPLE_CUTOFF: u64 = 64 * MIB;
-const WINDOW: u64 = MIB;
 const BUFFER: usize = 1 << 20;
 
 /// What one full read of a file produced.
@@ -47,37 +34,6 @@ pub fn fingerprint(path: &Path) -> io::Result<Fingerprint> {
     let mut hasher = Xxh3::new();
     hasher.update(&head);
     Ok(finish(HEAD_SCHEME, &hasher))
-}
-
-/// The fingerprint of a file whose stat reported `size`, in `scheme`. `None`
-/// when this build cannot compute that scheme, or when no row of that scheme
-/// can have this size.
-pub fn fingerprint_in(scheme: &str, path: &Path, size: u64) -> io::Result<Option<Fingerprint>> {
-    match scheme {
-        HEAD_SCHEME => fingerprint(path).map(Some),
-        FULL_SCHEME if size <= SAMPLE_CUTOFF => {
-            let mut hasher = Xxh3::new();
-            stream(&mut File::open(path)?, |chunk| hasher.update(chunk))?;
-            Ok(Some(finish(FULL_SCHEME, &hasher)))
-        }
-        SAMPLE_SCHEME if size > SAMPLE_CUTOFF => sample(path, size).map(Some),
-        _ => Ok(None),
-    }
-}
-
-fn sample(path: &Path, size: u64) -> io::Result<Fingerprint> {
-    let mut file = File::open(path)?;
-    let mut hasher = Xxh3::new();
-    hasher.update(&size.to_le_bytes());
-    let middle = size / 2 - WINDOW / 2;
-    for start in [0, middle, size - WINDOW] {
-        file.seek(SeekFrom::Start(start))?;
-        // A file that shrank since the stat gives a short window, not an error.
-        let mut window = Vec::with_capacity(WINDOW as usize);
-        (&mut file).take(WINDOW).read_to_end(&mut window)?;
-        hasher.update(&window);
-    }
-    Ok(finish(SAMPLE_SCHEME, &hasher))
 }
 
 /// Read a file once for BLAKE3, and for MD5 when asked. When `with_fingerprint`
@@ -145,7 +101,6 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Write;
 
     use xxhash_rust::xxh3::xxh3_128;
 
@@ -171,10 +126,6 @@ mod tests {
             digests.md5.as_deref(),
             Some("58ce66d7df0a1cf9b360cabf43da3ea5")
         );
-        let full = fingerprint_in(FULL_SCHEME, &path, 5).unwrap().unwrap();
-        assert_eq!(full.hex, format!("{:032x}", xxh3_128(b"ACGT\n")));
-        assert_eq!(fingerprint_in(SAMPLE_SCHEME, &path, 5).unwrap(), None);
-        assert_eq!(fingerprint_in("other", &path, 5).unwrap(), None);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -206,50 +157,6 @@ mod tests {
         bytes[HEAD as usize - 1] ^= 1;
         fs::write(&path, &bytes).unwrap();
         assert_ne!(fingerprint(&path).unwrap(), print);
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
-
-    /// Pins `xxh3-128-sample-v1` to its layout: size, first MiB, middle MiB,
-    /// last MiB. Changing any of these needs a new scheme name.
-    #[test]
-    fn the_sample_scheme_layout_is_pinned() {
-        let path = scratch("large");
-        let size = SAMPLE_CUTOFF + 3 * MIB + 17;
-        let file = fs::File::create(&path).unwrap();
-        file.set_len(size).unwrap();
-        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
-        let marks = [
-            (0, b"first"),
-            (size / 2 - MIB / 2, b"midst"),
-            (size - MIB, b"lasts"),
-            (size / 4, b"unrd!"),
-        ];
-        for (offset, mark) in marks {
-            file.seek(SeekFrom::Start(offset)).unwrap();
-            file.write_all(mark).unwrap();
-        }
-        drop(file);
-
-        let mut sample = size.to_le_bytes().to_vec();
-        for (_, mark) in &marks[..3] {
-            let mut window = vec![0u8; MIB as usize];
-            window[..5].copy_from_slice(*mark);
-            sample.extend_from_slice(&window);
-        }
-        let print = fingerprint_in(SAMPLE_SCHEME, &path, size).unwrap().unwrap();
-        assert_eq!(print.scheme, SAMPLE_SCHEME);
-        assert_eq!(print.hex, format!("{:032x}", xxh3_128(&sample)));
-
-        // Bytes outside the three windows do not change the sample.
-        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.seek(SeekFrom::Start(size / 4)).unwrap();
-        file.write_all(b"other").unwrap();
-        drop(file);
-        assert_eq!(
-            fingerprint_in(SAMPLE_SCHEME, &path, size).unwrap(),
-            Some(print)
-        );
-        assert_eq!(fingerprint_in(FULL_SCHEME, &path, size).unwrap(), None);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

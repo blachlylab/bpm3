@@ -246,7 +246,7 @@ fn track_batch(
     for probe in probes {
         progress.file();
         let read = reads.next().flatten();
-        let (path, uri) = match probe {
+        let uri = match probe {
             Probe::Unusable(uri, message) => {
                 errors.push((uri, message));
                 continue;
@@ -255,7 +255,7 @@ fn track_batch(
                 report.already += 1;
                 continue;
             }
-            Probe::Fresh(path, uri) => (path, uri),
+            Probe::Fresh(_, uri) => uri,
         };
         let (meta, print) = match read {
             Some(Read::Stat(meta, print)) => (meta, print),
@@ -290,7 +290,6 @@ fn track_batch(
             &mut hashed,
             &mut errors,
             report,
-            &path,
             seen,
             print,
         )?;
@@ -511,27 +510,16 @@ fn log_line(message: impl std::fmt::Display) {
 /// Decide what a new, fingerprinted path is: a copy of a file in this batch, a
 /// new location of a file in the catalog, or a new file. Only a fingerprint
 /// match leads to a full read, and only matching BLAKE3 values merge.
-#[allow(clippy::too_many_arguments)]
 fn plan_new_path(
     catalog: &Catalog,
     entries: &mut Vec<TrackEntry>,
     hashed: &mut HashMap<Uuid, (String, String)>,
     errors: &mut Vec<(String, String)>,
     report: &mut TrackReport,
-    path: &Path,
     seen: Seen,
     print: Fingerprint,
 ) -> Result<(), Error> {
-    let mut candidates = catalog.fingerprint_matches(seen.size, &print)?;
-    // Rows written under an earlier scheme are compared in that scheme, so a
-    // copy of a file tracked before the scheme changed is still found. This
-    // reads the new path again only when a row of that size exists.
-    for scheme in catalog.other_schemes(seen.size, &print.scheme)? {
-        // A path that cannot be read here fails the full read below as well.
-        if let Ok(Some(theirs)) = hash::fingerprint_in(&scheme, path, seen.size as u64) {
-            candidates.extend(catalog.fingerprint_matches(seen.size, &theirs)?);
-        }
-    }
+    let candidates = catalog.fingerprint_matches(seen.size, &print)?;
     let pending: Vec<usize> = entries
         .iter()
         .enumerate()

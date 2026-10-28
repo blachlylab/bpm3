@@ -239,7 +239,7 @@ Primary key `(file_id, key)`. An index on `(key, value)` supports the same selec
 | size_bytes | Last observed size at a present location, denormalized for query |
 | mtime | Last observed mtime, UTC |
 | fingerprint | Hex, or null when the bytes were not read |
-| fingerprint_scheme | Text, or null when `fingerprint` is null. The first schemes were `xxh3-128-full` and `xxh3-128-sample-v1`; new rows get `xxh3-128-head-256k`. Two fingerprints are compared only when the scheme strings are equal. A new scheme is a new string. An existing row gets it when scan reads its bytes and its BLAKE3 holds |
+| fingerprint_scheme | Text, or null when `fingerprint` is null. Rows get `xxh3-128-head-256k`. Two fingerprints are compared only when the scheme strings are equal. A new scheme is a new string. An existing row gets it when scan reads its bytes and its BLAKE3 holds |
 | created_at | First discovery |
 
 The file id does not depend on the fingerprint. Links, locations, and digests stay valid if the scheme changes or the fingerprint is null. The current digests are rows, not columns, so a computed BLAKE3 and a backend checksum of another algorithm coexist.
@@ -367,22 +367,13 @@ Track, scan, and acknowledge write one scheme:
 
 Track reads at most 256 KiB of a new path, on eight threads per batch. Scan takes the same window from the full read it already makes. Two different files with the same size and the same first 256 KiB cost two full reads to tell apart; they are never merged.
 
-Earlier builds wrote two schemes, which rows may still carry:
-
-| File size | Scheme name | Bytes hashed |
-| --- | --- | --- |
-| ≤ 64 MiB | `xxh3-128-full` | The entire file |
-| > 64 MiB | `xxh3-128-sample-v1` | A length-prefixed sample: the file size as an 8-byte little-endian integer, then the first 1 MiB, 1 MiB centered on the midpoint, and the last 1 MiB. Short reads at the ends use the bytes that exist. |
-
-When a new path has the size of a row that carries an earlier scheme, track also computes the new path's fingerprint in that scheme and compares it, so a copy of a file tracked before the change is still found. Only sizes that match pay that read.
-
 XXH3-128 is the first hash, not a permanent choice. The scheme name is stored on the row that carries that fingerprint. Two fingerprints are compared only when those strings are equal. A different scheme, or a null fingerprint, is not evidence that the bytes differ. Confirmation is a digest comparison. Fingerprint equality never merges file ids.
 
-The 256 KiB window belongs to `xxh3-128-head-256k`, and the 64 MiB cutoff and the 1 MiB windows to `xxh3-128-sample-v1`. Tests pin each name to its layout. A different cutoff or window is a new scheme name. No migration rewrites stored rows, and opening the catalog does not recompute them. The upgrade path for any later scheme is the same as for this one:
+The 256 KiB window belongs to `xxh3-128-head-256k`, and a test pins the name to it. A different window is a new scheme name. Development builds before the first release wrote two other schemes, `xxh3-128-full` and `xxh3-128-sample-v1`; no catalog in use carries them, and this build neither writes nor computes them. No migration rewrites stored rows, and opening the catalog does not recompute them. When a later scheme replaces this one:
 
 1. New rows get the new scheme.
-2. Scan, which reads every byte anyway, writes the new scheme on a row whose stored scheme is older, but only when the BLAKE3 of that read matches the row's current digest. A fingerprint never describes bytes other than the current digest's.
-3. Until a row is upgraded, track compares a new path of the same size with it in the row's scheme. An earlier scheme stays computable, and pinned by its test, for as long as rows may carry it.
+2. Scan, which reads every byte anyway, writes the new scheme on a row whose stored scheme is another, but only when the BLAKE3 of that read matches the row's current digest. A fingerprint never describes bytes other than the current digest's. This is built and tested now, against a made-up scheme name.
+3. Until a row is upgraded, track finds a copy of it only if the new build also computes the old scheme for a new path of the same size and compares. That change ships with the new scheme, keeps the old one pinned by its test for as long as rows may carry it, and costs a read only for sizes that match.
 
 ### Full digest
 

@@ -116,7 +116,7 @@ fn build(path: &Path) {
         let mut file = tx
             .prepare(
                 "INSERT INTO files (id, size_bytes, mtime, fingerprint, fingerprint_scheme, created_at)
-                 VALUES (?, ?, ?, ?, 'xxh3-128-full', ?)",
+                 VALUES (?, ?, ?, ?, 'xxh3-128-head-256k', ?)",
             )
             .unwrap();
         let mut location = tx

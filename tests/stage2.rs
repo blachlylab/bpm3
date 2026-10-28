@@ -902,43 +902,6 @@ fn a_new_file_already_committed_by_another_track_becomes_a_location() {
 }
 
 #[test]
-fn a_copy_of_a_file_fingerprinted_under_an_earlier_scheme_is_found() {
-    use xxhash_rust::xxh3::xxh3_128;
-
-    let env = Env::new("old-scheme");
-    let bytes = b"ACGT tracked before the head scheme\n";
-    let other = b"TGCA tracked before the head scheme\n";
-    let first = env.data().join("first");
-    write(&first.join("x.fq"), bytes);
-    write(&first.join("y.fq"), other);
-    env.track(&first);
-    // Rewrite both rows as an earlier build stored them.
-    let conn = rusqlite::Connection::open(&env.catalog).unwrap();
-    for (name, content) in [("x.fq", &bytes[..]), ("y.fq", &other[..])] {
-        conn.execute(
-            "UPDATE files SET fingerprint_scheme = 'xxh3-128-full', fingerprint = ?
-             WHERE id = ?",
-            rusqlite::params![
-                format!("{:032x}", xxh3_128(content)),
-                env.id_at(&first.join(name))
-            ],
-        )
-        .unwrap();
-    }
-    drop(conn);
-
-    let second = env.data().join("second");
-    write(&second.join("x.fq"), bytes);
-    let run = env.track(&second);
-    assert!(run.out.contains("1 copies"), "{}", run.out);
-    assert_eq!(env.count("files"), 2);
-    assert_eq!(
-        env.id_at(&second.join("x.fq")),
-        env.id_at(&first.join("x.fq"))
-    );
-}
-
-#[test]
 fn scan_moves_a_row_to_the_current_scheme_only_when_blake3_holds() {
     let env = Env::new("upgrade");
     let run42 = env.data().join("run42");
@@ -951,7 +914,7 @@ fn scan_moves_a_row_to_the_current_scheme_only_when_blake3_holds() {
     let conn = rusqlite::Connection::open(&env.catalog).unwrap();
     for path in [&kept, &changed] {
         conn.execute(
-            "UPDATE files SET fingerprint_scheme = 'xxh3-128-full', fingerprint = ?
+            "UPDATE files SET fingerprint_scheme = 'an-earlier-scheme', fingerprint = ?
              WHERE id = ?",
             rusqlite::params!["0".repeat(32), env.id_at(path)],
         )
@@ -966,7 +929,7 @@ fn scan_moves_a_row_to_the_current_scheme_only_when_blake3_holds() {
     assert!(env.drift(&changed).contains(&"digest_mismatch".to_string()));
     let scheme = |path: &Path| env.file_at(path)["fingerprint"]["scheme"].clone();
     assert_eq!(scheme(&kept), "xxh3-128-head-256k");
-    assert_eq!(scheme(&changed), "xxh3-128-full");
+    assert_eq!(scheme(&changed), "an-earlier-scheme");
 }
 
 #[test]
